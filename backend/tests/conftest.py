@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -7,7 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+os.environ.setdefault("JWT_SECRET", "test-secret")
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test-suite-bootstrap.db")
+
 from app.core import database
+from app.core.celery_app import celery_app
+from app.core.config import settings
+from app.core.rate_limiter import rate_limiter
 from app.core.security import hash_password
 from app.main import app as fastapi_app
 from app.models import Owner, Subscriber, User
@@ -16,9 +23,16 @@ from app.models import Owner, Subscriber, User
 @pytest.fixture
 def app(tmp_path):
     database_path = tmp_path / "test.db"
-    database.init_engine(f"sqlite:///{database_path}")
+    database_url = f"sqlite:///{database_path}"
+    settings.database_url = database_url
+    previous_task_always_eager = celery_app.conf.task_always_eager
+    previous_task_ignore_result = celery_app.conf.task_ignore_result
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_ignore_result = True
+    database.init_engine(database_url)
     database.Base.metadata.drop_all(bind=database.engine)
     database.Base.metadata.create_all(bind=database.engine)
+    rate_limiter.clear()
 
     with database.SessionLocal() as db:
         owner_user = User(
@@ -72,7 +86,12 @@ def app(tmp_path):
         db.add(subscriber)
         db.commit()
 
-    return fastapi_app
+    try:
+        yield fastapi_app
+    finally:
+        rate_limiter.clear()
+        celery_app.conf.task_always_eager = previous_task_always_eager
+        celery_app.conf.task_ignore_result = previous_task_ignore_result
 
 
 @pytest.fixture

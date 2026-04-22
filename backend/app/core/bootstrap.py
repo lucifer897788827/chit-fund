@@ -1,14 +1,44 @@
 from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
 
-from sqlalchemy import select
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import inspect, select, text
 
+from app.core import config as config_module
 from app.core import database
 from app.core.security import hash_password
-from app.models import AuctionSession, ChitGroup, ExternalChit, GroupMembership, Installment, Owner, Subscriber, User
+from app.models import AuctionSession, ChitGroup, ExternalChit, GroupMembership, Installment, MembershipSlot, Owner, Subscriber, User
+
+
+def _schema_exists_without_alembic_version() -> bool:
+    with database.engine.connect() as connection:
+        table_names = set(inspect(connection).get_table_names())
+
+    if "alembic_version" in table_names:
+        return False
+
+    managed_tables = set(database.Base.metadata.tables.keys())
+    return any(table_name in table_names for table_name in managed_tables)
+
+
+def _run_migrations() -> None:
+    backend_root = Path(__file__).resolve().parents[2]
+    alembic_cfg = Config(str(backend_root / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(backend_root / "alembic"))
+
+    if _schema_exists_without_alembic_version():
+        command.stamp(alembic_cfg, "head")
+
+    command.upgrade(alembic_cfg, "head")
 
 
 def bootstrap_database() -> None:
-    database.Base.metadata.create_all(bind=database.engine)
+    _run_migrations()
+
+    if not config_module.settings.is_dev_profile:
+        return
 
     with database.SessionLocal() as db:
         existing_user = db.scalar(select(User.id).limit(1))
@@ -101,6 +131,23 @@ def bootstrap_database() -> None:
         db.add_all(memberships)
         db.flush()
 
+        db.add_all(
+            [
+                MembershipSlot(
+                    user_id=owner_user.id,
+                    group_id=group.id,
+                    slot_number=memberships[0].member_no,
+                    has_won=False,
+                ),
+                MembershipSlot(
+                    user_id=subscriber_user.id,
+                    group_id=group.id,
+                    slot_number=memberships[1].member_no,
+                    has_won=False,
+                ),
+            ]
+        )
+
         for membership in memberships:
             db.add(
                 Installment(
@@ -140,3 +187,90 @@ def bootstrap_database() -> None:
             )
         )
         db.commit()
+
+
+def check_database_readiness() -> dict[str, Any]:
+    try:
+        with database.engine.connect() as connection:
+            connection.execute(text("select 1"))
+    except Exception as exc:  # pragma: no cover - exercised through health tests
+        return {
+            "ok": False,
+            "status": "down",
+            "detail": str(exc),
+        }
+
+    return {
+        "ok": True,
+        "status": "up",
+    }
+
+
+def check_redis_readiness() -> dict[str, Any]:
+    from app.core.redis import redis_client
+
+    try:
+        ok = redis_client.ping()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {
+            "ok": False,
+            "status": "down",
+            "detail": str(exc),
+        }
+
+    if not ok:
+        return {
+            "ok": False,
+            "status": "down",
+            "detail": "ping failed",
+        }
+
+    return {
+        "ok": True,
+        "status": "up",
+    }
+
+
+def check_celery_broker_readiness() -> dict[str, Any]:
+    from app.core.celery_app import celery_app
+
+    connection = celery_app.connection_for_read()
+    try:
+        connection.ensure_connection(
+            max_retries=1,
+            interval_start=0,
+            interval_step=0,
+            interval_max=0,
+        )
+    except Exception as exc:  # pragma: no cover - exercised through health tests
+        return {
+            "ok": False,
+            "status": "down",
+            "detail": str(exc),
+        }
+    finally:
+        try:
+            connection.release()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+    return {
+        "ok": True,
+        "status": "up",
+    }
+
+
+def build_runtime_readiness_report() -> dict[str, Any]:
+    checks = {
+        "database": check_database_readiness(),
+        "redis": check_redis_readiness(),
+        "celeryBroker": check_celery_broker_readiness(),
+    }
+    ready = all(check["ok"] for check in checks.values())
+
+    return {
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
+        "environment": config_module.settings.app_env,
+        "checks": checks,
+    }

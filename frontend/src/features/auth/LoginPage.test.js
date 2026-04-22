@@ -42,6 +42,14 @@ test("signs in and routes owners to the owner dashboard", async () => {
     </MemoryRouter>,
   );
 
+  expect(screen.getByRole("link", { name: /Create an account/i })).toHaveAttribute("href", "/signup");
+  expect(screen.getByRole("link", { name: /Forgot password\?/i })).toHaveAttribute(
+    "href",
+    "/reset-password",
+  );
+  expect(screen.queryByText(/Demo owner/i)).not.toBeInTheDocument();
+  expect(screen.getByLabelText(/Phone Number/i)).toHaveAttribute("placeholder", "Enter phone number");
+
   await user.type(screen.getByLabelText(/Phone Number/i), "9999999999");
   await user.type(screen.getByLabelText(/Password/i), "secret123");
   await user.click(screen.getByRole("button", { name: /Sign In/i }));

@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
+import { FormActions, FormField, FormFrame } from "../../components/form-primitives";
 import { loginUser } from "./api";
+import { getApiErrorMessage } from "../../lib/api-error";
 import { saveSession } from "../../lib/auth/store";
 
 export default function LoginPage() {
@@ -20,8 +22,12 @@ export default function LoginPage() {
       const session = await loginUser({ phone, password });
       saveSession(session);
       navigate(session.role === "chit_owner" ? "/owner" : "/subscriber");
-    } catch (_error) {
-      setError("Invalid phone number or password.");
+    } catch (loginError) {
+      setError(
+        getApiErrorMessage(loginError, {
+          fallbackMessage: "Invalid phone number or password.",
+        }),
+      );
     } finally {
       setSubmitting(false);
     }
@@ -29,40 +35,44 @@ export default function LoginPage() {
 
   return (
     <main className="app-shell">
-      <section className="auth-card">
-        <h1>Sign In</h1>
-        <p>Access your chit dashboard and live auctions.</p>
+      <FormFrame description="Access your chit dashboard and live auctions." title="Sign in">
         <form className="auction-form" onSubmit={handleSubmit}>
-          <label className="field-label" htmlFor="phone">
-            Phone Number
-          </label>
-          <input
-            className="text-input"
-            id="phone"
-            onChange={(event) => setPhone(event.target.value)}
-            placeholder="9999999999"
-            type="tel"
-            value={phone}
-          />
-          <label className="field-label" htmlFor="password">
-            Password
-          </label>
-          <input
-            className="text-input"
-            id="password"
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="Enter password"
-            type="password"
-            value={password}
-          />
-          {error ? <p>{error}</p> : null}
-          <button className="action-button" disabled={submitting} type="submit">
-            {submitting ? "Signing In..." : "Sign In"}
-          </button>
+          <FormField htmlFor="phone" label="Phone number">
+            <input
+              className="text-input"
+              id="phone"
+              onChange={(event) => setPhone(event.target.value)}
+              placeholder="Enter phone number"
+              type="tel"
+              value={phone}
+            />
+          </FormField>
+          <FormField htmlFor="password" label="Password">
+            <input
+              className="text-input"
+              id="password"
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Enter password"
+              type="password"
+              value={password}
+            />
+          </FormField>
+          {error ? (
+            <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <FormActions>
+            <button className="action-button" disabled={submitting} type="submit">
+              {submitting ? "Signing In..." : "Sign In"}
+            </button>
+          </FormActions>
+          <div className="auth-links">
+            <Link to="/signup">Create an account</Link>
+            <Link to="/reset-password">Forgot password?</Link>
+          </div>
         </form>
-        <p>Demo owner: 9999999999 / secret123</p>
-        <p>Demo subscriber: 8888888888 / pass123</p>
-      </section>
+      </FormFrame>
     </main>
   );
 }

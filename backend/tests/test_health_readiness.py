@@ -1,0 +1,122 @@
+from fastapi.testclient import TestClient
+import app.core.bootstrap as bootstrap_module
+
+
+def test_health_endpoint_remains_unchanged(app):
+    client = TestClient(app)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_build_runtime_readiness_report_aggregates_dependency_checks(monkeypatch):
+    monkeypatch.setattr(bootstrap_module.config_module.settings, "app_env", "production")
+    monkeypatch.setattr(
+        bootstrap_module,
+        "check_database_readiness",
+        lambda: {"ok": True, "status": "up"},
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "check_redis_readiness",
+        lambda: {"ok": True, "status": "up"},
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "check_celery_broker_readiness",
+        lambda: {"ok": True, "status": "up"},
+    )
+
+    report = bootstrap_module.build_runtime_readiness_report()
+
+    assert report["status"] == "ok"
+    assert report["ready"] is True
+    assert report["environment"] == "production"
+    assert report["checks"]["database"]["status"] == "up"
+
+
+def test_readiness_endpoint_returns_detailed_status(app, monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "build_runtime_readiness_report",
+        lambda: {
+            "status": "ok",
+            "ready": True,
+            "environment": "production",
+            "checks": {
+                "database": {"ok": True, "status": "up"},
+                "redis": {"ok": True, "status": "up"},
+                "celeryBroker": {"ok": True, "status": "up"},
+            },
+        },
+    )
+    monkeypatch.setattr(main_module.settings, "app_env", "production")
+
+    client = TestClient(app)
+    response = client.get("/api/health/readiness")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
+    assert response.json()["checks"]["database"]["status"] == "up"
+    assert response.json()["checks"]["redis"]["status"] == "up"
+    assert response.json()["checks"]["celeryBroker"]["status"] == "up"
+
+
+def test_readiness_endpoint_fail_opens_in_local_development(app, monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "build_runtime_readiness_report",
+        lambda: {
+            "status": "degraded",
+            "ready": False,
+            "environment": "development",
+            "checks": {
+                "database": {"ok": True, "status": "up"},
+                "redis": {"ok": False, "status": "down", "detail": "redis offline"},
+                "celeryBroker": {"ok": False, "status": "down", "detail": "broker offline"},
+            },
+        },
+    )
+    monkeypatch.setattr(main_module.settings, "app_env", "development")
+
+    client = TestClient(app)
+    response = client.get("/api/health/readiness")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is False
+    assert body["status"] == "degraded"
+    assert body["checks"]["redis"]["detail"] == "redis offline"
+
+
+def test_readiness_endpoint_returns_503_for_production_failures(app, monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "build_runtime_readiness_report",
+        lambda: {
+            "status": "degraded",
+            "ready": False,
+            "environment": "production",
+            "checks": {
+                "database": {"ok": False, "status": "down", "detail": "db offline"},
+                "redis": {"ok": True, "status": "up"},
+                "celeryBroker": {"ok": True, "status": "up"},
+            },
+        },
+    )
+    monkeypatch.setattr(main_module.settings, "app_env", "production")
+
+    client = TestClient(app)
+    response = client.get("/api/health/readiness")
+
+    assert response.status_code == 503
+    assert response.json()["ready"] is False
+    assert response.json()["checks"]["database"]["detail"] == "db offline"
