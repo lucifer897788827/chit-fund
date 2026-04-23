@@ -118,4 +118,16 @@ describe("apiClient refresh handling", () => {
       baseURL: "http://127.0.0.1:8000/api",
     });
   });
+
+  test("uses the current network host for frontend dev ports", () => {
+    delete process.env.REACT_APP_BACKEND_URL;
+    setWindowLocation("http://192.168.1.50:3000/");
+
+    const axiosModule = require("axios");
+    require("./client");
+
+    expect(axiosModule.create).toHaveBeenCalledWith({
+      baseURL: "http://192.168.1.50:8000/api",
+    });
+  });
 });

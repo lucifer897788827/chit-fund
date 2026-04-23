@@ -10,7 +10,9 @@ function getBackendUrl() {
 
   if (typeof window !== "undefined") {
     const hostname = window.location.hostname || "localhost";
-    if (hostname === "localhost" || hostname === "127.0.0.1") {
+    const frontendPort = window.location.port;
+    const isFrontendDevPort = frontendPort === "3000" || frontendPort === "4173";
+    if (hostname === "localhost" || hostname === "127.0.0.1" || isFrontendDevPort) {
       return `${window.location.protocol}//${hostname}:8000`;
     }
   }
