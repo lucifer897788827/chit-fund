@@ -103,6 +103,7 @@ def test_subscriber_can_self_join_active_group(app, db_session):
         member_count=10,
         cycle_count=3,
         cycle_frequency="monthly",
+        visibility="public",
         start_date=date(2026, 5, 1),
         first_auction_date=date(2026, 5, 10),
         current_cycle_no=1,

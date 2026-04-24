@@ -22,6 +22,7 @@ class GroupCreate(BaseModel):
     penaltyType: str | None = None
     penaltyValue: float | int | None = None
     gracePeriodDays: int = 0
+    visibility: str = "private"
 
     @field_validator("chitValue", "installmentAmount", mode="before")
     @classmethod

@@ -78,11 +78,13 @@ def _decode_token(token: str) -> str:
     return subject
 
 
-def get_current_user(
+def _resolve_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
-) -> CurrentUser:
-    if credentials is None or credentials.scheme.lower() != "bearer":
+) -> CurrentUser | None:
+    if credentials is None:
+        return None
+    if credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
     user_id_text = _decode_token(credentials.credentials)
@@ -91,13 +93,35 @@ def get_current_user(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
 
-    user = db.scalar(select(User).where(User.id == user_id))
+    row = db.execute(
+        select(User, Owner, Subscriber)
+        .outerjoin(Owner, Owner.user_id == User.id)
+        .outerjoin(Subscriber, Subscriber.user_id == User.id)
+        .where(User.id == user_id)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    user, owner, subscriber = row
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-    owner = db.scalar(select(Owner).where(Owner.user_id == user.id))
-    subscriber = db.scalar(select(Subscriber).where(Subscriber.user_id == user.id))
     return CurrentUser(user=user, owner=owner, subscriber=subscriber)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> CurrentUser:
+    current_user = _resolve_current_user(credentials, db)
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    return current_user
+
+
+def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> CurrentUser | None:
+    return _resolve_current_user(credentials, db)
 
 
 def require_owner(current_user: CurrentUser) -> Owner:
@@ -110,3 +134,9 @@ def require_subscriber(current_user: CurrentUser) -> Subscriber:
     if current_user.subscriber is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscriber profile required")
     return current_user.subscriber
+
+
+def require_admin(current_user: CurrentUser) -> User:
+    if current_user.user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    return current_user.user

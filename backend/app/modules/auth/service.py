@@ -176,6 +176,8 @@ def _cleanup_refresh_tokens(db: Session) -> int:
 def _build_token_response(db: Session, user: User, refresh_token: str, refresh_token_expires_at: datetime) -> dict:
     owner = db.scalar(select(Owner).where(Owner.user_id == user.id))
     subscriber = db.scalar(select(Subscriber).where(Subscriber.user_id == user.id))
+    roles = _resolve_roles(user=user, owner=owner, subscriber=subscriber)
+    primary_role = _derive_primary_role(user=user, roles=roles)
     return {
         "access_token": create_access_token(str(user.id)),
         "token_type": "bearer",
@@ -183,10 +185,55 @@ def _build_token_response(db: Session, user: User, refresh_token: str, refresh_t
         "refresh_token_expires_at": refresh_token_expires_at,
         "access_token_expires_in": ACCESS_TOKEN_EXPIRES_MINUTES * 60,
         "refresh_token_expires_in": REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60,
-        "role": user.role,
+        "role": primary_role,
+        "roles": roles,
         "owner_id": owner.id if owner else None,
         "subscriber_id": subscriber.id if subscriber else None,
         "has_subscriber_profile": subscriber is not None,
+        "user": {
+            "id": user.id,
+            "roles": roles,
+        },
+    }
+
+
+def _resolve_roles(*, user: User, owner: Owner | None, subscriber: Subscriber | None) -> list[str]:
+    roles: list[str] = []
+    if subscriber is not None:
+        roles.append("subscriber")
+    if owner is not None:
+        roles.append("owner")
+    if user.role == "admin":
+        roles.append("admin")
+    return roles
+
+
+def _derive_primary_role(*, user: User, roles: list[str]) -> str:
+    if "admin" in roles:
+        return "admin"
+    if "owner" in roles:
+        return "chit_owner"
+    if "subscriber" in roles:
+        return "subscriber"
+    return user.role
+
+
+def build_auth_me_response(current_user: CurrentUser) -> dict:
+    roles = _resolve_roles(
+        user=current_user.user,
+        owner=current_user.owner,
+        subscriber=current_user.subscriber,
+    )
+    return {
+        "role": _derive_primary_role(user=current_user.user, roles=roles),
+        "roles": roles,
+        "owner_id": current_user.owner.id if current_user.owner else None,
+        "subscriber_id": current_user.subscriber.id if current_user.subscriber else None,
+        "has_subscriber_profile": current_user.subscriber is not None,
+        "user": {
+            "id": current_user.user.id,
+            "roles": roles,
+        },
     }
 
 
@@ -309,7 +356,10 @@ def request_password_reset(db: Session, phone: str) -> dict:
     db.commit()
     response_token = reset_token if settings.is_dev_profile else None
     response_expires_at = expires_at if settings.is_dev_profile else None
-    dispatch_staged_notifications(db)
+    try:
+        dispatch_staged_notifications(db)
+    except Exception:
+        pass
     return {
         "message": message,
         "reset_token": response_token,
@@ -318,10 +368,10 @@ def request_password_reset(db: Session, phone: str) -> dict:
 
 
 def confirm_password_reset(db: Session, token: str, new_password: str) -> dict:
-    if not isinstance(new_password, str) or not new_password.strip():
+    if not isinstance(new_password, str) or len(new_password.strip()) < 8:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="New password is required",
+            detail="New password must be at least 8 characters",
         )
 
     token_hash = hash_password_reset_token(token)
@@ -342,5 +392,8 @@ def confirm_password_reset(db: Session, token: str, new_password: str) -> dict:
     notify_password_reset_confirmed(db, user=user)
     _cleanup_refresh_tokens(db)
     db.commit()
-    dispatch_staged_notifications(db)
+    try:
+        dispatch_staged_notifications(db)
+    except Exception:
+        pass
     return {"message": "Password has been reset"}

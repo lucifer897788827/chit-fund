@@ -1,3 +1,5 @@
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.chit import ChitGroup, GroupMembership, Installment
@@ -22,7 +24,19 @@ def _build_payment_description(db: Session, payment: Payment) -> str:
 
 
 def create_payment_ledger_entry(db: Session, payment: Payment) -> LedgerEntry:
+    return ensure_payment_ledger_entry(db, payment)
+
+
+def ensure_payment_ledger_entry(db: Session, payment: Payment) -> LedgerEntry:
     db.flush()
+    existing_entry = db.scalar(
+        select(LedgerEntry).where(
+            LedgerEntry.source_table == "payments",
+            LedgerEntry.source_id == payment.id,
+        )
+    )
+    if existing_entry is not None:
+        return existing_entry
 
     membership = db.get(GroupMembership, payment.membership_id) if payment.membership_id else None
     installment = db.get(Installment, payment.installment_id) if payment.installment_id else None
@@ -38,6 +52,18 @@ def create_payment_ledger_entry(db: Session, payment: Payment) -> LedgerEntry:
         credit_amount=0,
         description=_build_payment_description(db, payment),
     )
-    db.add(entry)
-    db.flush()
+    try:
+        with db.begin_nested():
+            db.add(entry)
+            db.flush()
+    except IntegrityError:
+        existing_entry = db.scalar(
+            select(LedgerEntry).where(
+                LedgerEntry.source_table == "payments",
+                LedgerEntry.source_id == payment.id,
+            )
+        )
+        if existing_entry is not None:
+            return existing_entry
+        raise
     return entry

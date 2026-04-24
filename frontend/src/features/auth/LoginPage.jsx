@@ -4,7 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { FormActions, FormField, FormFrame } from "../../components/form-primitives";
 import { loginUser } from "./api";
 import { getApiErrorMessage } from "../../lib/api-error";
-import { saveSession } from "../../lib/auth/store";
+import { getDashboardPath, saveSession } from "../../lib/auth/store";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -21,7 +21,7 @@ export default function LoginPage() {
     try {
       const session = await loginUser({ phone, password });
       saveSession(session);
-      navigate(session.role === "chit_owner" ? "/owner" : "/subscriber");
+      navigate(getDashboardPath(session));
     } catch (loginError) {
       setError(
         getApiErrorMessage(loginError, {

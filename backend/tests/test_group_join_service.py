@@ -28,7 +28,14 @@ def _owner_current_user(db_session) -> CurrentUser:
     return CurrentUser(user=user, owner=owner, subscriber=None)
 
 
-def _create_group(db_session, *, status: str = "active", member_count: int = 3, cycle_count: int = 3):
+def _create_group(
+    db_session,
+    *,
+    status: str = "active",
+    member_count: int = 3,
+    cycle_count: int = 3,
+    visibility: str = "public",
+):
     owner = db_session.scalar(select(Owner).order_by(Owner.id.asc()))
     assert owner is not None
     group = ChitGroup(
@@ -40,6 +47,7 @@ def _create_group(db_session, *, status: str = "active", member_count: int = 3, 
         member_count=member_count,
         cycle_count=cycle_count,
         cycle_frequency="monthly",
+        visibility=visibility,
         start_date=date(2026, 6, 1),
         first_auction_date=date(2026, 6, 10),
         current_cycle_no=1,
@@ -70,6 +78,16 @@ def test_join_group_rejects_inactive_group(db_session):
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "Group is not active"
+
+
+def test_join_group_rejects_private_group_self_join(db_session):
+    group = _create_group(db_session, visibility="private")
+
+    with pytest.raises(HTTPException) as exc_info:
+        join_group(db_session, group.id, {"subscriberId": 2, "memberNo": 1}, _subscriber_current_user(db_session))
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Private groups require owner approval or invite"
 
 
 def test_join_group_rejects_full_group(db_session):
@@ -124,7 +142,7 @@ def test_join_group_rejects_existing_slot_number_for_same_subscriber(db_session)
         join_group(db_session, group.id, {"subscriberId": 2, "memberNo": 1}, _subscriber_current_user(db_session))
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "Member number is already assigned to this subscriber"
+    assert exc_info.value.detail == "Membership already exists"
 
 
 def test_join_group_rejects_duplicate_member_number(db_session):
@@ -199,7 +217,7 @@ def test_join_group_skips_elapsed_cycles_for_fresh_memberships(db_session, monke
     assert [row.due_date for row in installments] == [date(2026, 3, 1), date(2026, 4, 1)]
 
 
-def test_join_group_allows_existing_subscriber_to_add_another_slot(db_session):
+def test_join_group_rejects_existing_membership_slot_escalation(db_session):
     group = _create_group(db_session, member_count=4, cycle_count=3)
     membership = GroupMembership(
         group_id=group.id,
@@ -235,22 +253,8 @@ def test_join_group_allows_existing_subscriber_to_add_another_slot(db_session):
         )
     db_session.commit()
 
-    result = join_group(db_session, group.id, {"subscriberId": 2, "memberNo": 2}, _subscriber_current_user(db_session))
+    with pytest.raises(HTTPException) as exc_info:
+        join_group(db_session, group.id, {"subscriberId": 2, "memberNo": 2}, _subscriber_current_user(db_session))
 
-    membership_rows = db_session.scalars(
-        select(GroupMembership).where(GroupMembership.group_id == group.id, GroupMembership.subscriber_id == 2)
-    ).all()
-    slot_rows = db_session.scalars(
-        select(MembershipSlot)
-        .where(MembershipSlot.group_id == group.id, MembershipSlot.user_id == 2)
-        .order_by(MembershipSlot.slot_number.asc())
-    ).all()
-    installments = db_session.scalars(
-        select(Installment).where(Installment.group_id == group.id, Installment.membership_id == membership_rows[0].id).order_by(Installment.cycle_no)
-    ).all()
-
-    assert len(membership_rows) == 1
-    assert [slot.slot_number for slot in slot_rows] == [1, 2]
-    assert result["slotCount"] == 2
-    assert result["remainingSlotCount"] == 2
-    assert [float(row.due_amount) for row in installments] == [30000.0, 30000.0, 30000.0]
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Membership already exists"

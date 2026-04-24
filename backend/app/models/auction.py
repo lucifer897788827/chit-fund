@@ -64,6 +64,15 @@ class AuctionBid(Base):
     supersedes_bid_id: Mapped[int | None] = mapped_column(nullable=True)
 
 
+Index(
+    "ix_auction_bids_session_bid_amount_desc_placed_at_id",
+    AuctionBid.auction_session_id,
+    AuctionBid.bid_amount.desc(),
+    AuctionBid.placed_at,
+    AuctionBid.id,
+)
+
+
 class AuctionResult(Base):
     __tablename__ = "auction_results"
 
@@ -81,3 +90,20 @@ class AuctionResult(Base):
     finalized_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     finalized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class FinalizeJob(Base):
+    __tablename__ = "finalize_jobs"
+    __table_args__ = (
+        UniqueConstraint("auction_id"),
+        Index("ix_finalize_jobs_status_created_at_id", "status", "created_at", "id"),
+        Index("ix_finalize_jobs_status_updated_at_id", "status", "updated_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    auction_id: Mapped[int] = mapped_column(ForeignKey("auction_sessions.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

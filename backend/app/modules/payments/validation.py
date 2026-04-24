@@ -23,6 +23,10 @@ PAYOUT_STATUS_ALIASES = {
     "completed": PAYOUT_STATUS_SETTLED,
     "settled": PAYOUT_STATUS_SETTLED,
 }
+PAYOUT_STATUS_FILTER_VALUES = frozenset(PAYOUT_STATUS_ALIASES) | {
+    PAYOUT_STATUS_PENDING,
+    PAYOUT_STATUS_SETTLED,
+}
 
 
 @dataclass(slots=True)
@@ -110,6 +114,12 @@ def normalize_payout_status(status_value: str | None) -> str:
 
 
 def payout_status_filter_values(status_value: str | None) -> tuple[str, ...]:
+    normalized_input = (status_value or "").strip().lower()
+    if normalized_input not in PAYOUT_STATUS_FILTER_VALUES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Unsupported payout status filter",
+        )
     normalized_status = normalize_payout_status(status_value)
     matching_statuses = {
         raw_status
@@ -137,12 +147,7 @@ def validate_payment_submission(db: Session, payload, current_user: CurrentUser)
             detail="Payment amount must be greater than zero",
         )
 
-    subscriber = db.scalar(
-        select(Subscriber).where(
-            Subscriber.id == payload.subscriberId,
-            Subscriber.owner_id == owner.id,
-        )
-    )
+    subscriber = db.scalar(select(Subscriber).where(Subscriber.id == payload.subscriberId))
     if subscriber is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -172,6 +177,11 @@ def validate_payment_submission(db: Session, payload, current_user: CurrentUser)
                 detail="Membership does not match subscriber",
             )
         group = db.get(ChitGroup, membership.group_id)
+    elif subscriber.owner_id != owner.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Subscriber does not belong to this owner",
+        )
 
     cycle_no = getattr(payload, "cycleNo", None)
     installment = None

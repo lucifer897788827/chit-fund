@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import LoginPage from "./LoginPage";
 import { loginUser } from "./api";
-import { saveSession } from "../../lib/auth/store";
+import { getDashboardPath, saveSession } from "../../lib/auth/store";
 
 const mockNavigate = jest.fn();
 
@@ -14,6 +14,7 @@ jest.mock("./api", () => ({
 
 jest.mock("../../lib/auth/store", () => ({
   saveSession: jest.fn(),
+  getDashboardPath: jest.fn(),
 }));
 
 jest.mock("react-router-dom", () => ({
@@ -23,6 +24,12 @@ jest.mock("react-router-dom", () => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  getDashboardPath.mockImplementation((session) => {
+    if (session.role === "admin") {
+      return "/admin-dashboard";
+    }
+    return session.role === "chit_owner" ? "/owner-dashboard" : "/subscriber-dashboard";
+  });
 });
 
 test("signs in and routes owners to the owner dashboard", async () => {
@@ -67,5 +74,37 @@ test("signs in and routes owners to the owner dashboard", async () => {
       subscriber_id: 7,
     }),
   );
-  expect(mockNavigate).toHaveBeenCalledWith("/owner");
+  expect(mockNavigate).toHaveBeenCalledWith("/owner-dashboard");
+});
+
+test("keeps subscriber login routing on the subscriber dashboard", async () => {
+  const user = userEvent.setup();
+  loginUser.mockResolvedValue({
+    access_token: "token-2",
+    token_type: "bearer",
+    role: "subscriber",
+    owner_id: null,
+    subscriber_id: 9,
+    has_subscriber_profile: true,
+  });
+
+  render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <LoginPage />
+    </MemoryRouter>,
+  );
+
+  await user.type(screen.getByLabelText(/Phone Number/i), "8888888888");
+  await user.type(screen.getByLabelText(/Password/i), "pass123");
+  await user.click(screen.getByRole("button", { name: /Sign In/i }));
+
+  await waitFor(() => {
+    expect(saveSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "subscriber",
+        subscriber_id: 9,
+      }),
+    );
+  });
+  expect(mockNavigate).toHaveBeenCalledWith("/subscriber-dashboard");
 });

@@ -6,7 +6,14 @@ import { PageErrorState, PageLoadingState } from "../../components/page-state";
 import { useSignedInShellHeader } from "../../components/signed-in-shell";
 import { getApiErrorMessage } from "../../lib/api-error";
 import { getCurrentUser } from "../../lib/auth/store";
-import { createAuctionSession } from "../auctions/api";
+import {
+  approveGroupMembershipRequest,
+  inviteSubscriberToGroup,
+  createAuctionSession,
+  createGroup,
+  fetchOwnerMembershipRequests,
+  rejectGroupMembershipRequest,
+} from "../auctions/api";
 import { buildMemberBalanceSummary, formatMoney, MemberBalanceSummary } from "../payments/balances";
 import OwnerPayoutsPanel from "../payments/OwnerPayoutsPanel";
 import { fetchOwnerPayouts, settleOwnerPayout } from "../payments/api";
@@ -120,6 +127,20 @@ function normalizeOwnerDashboard(data = {}, currentOwnerId = null) {
     balances: Array.isArray(data?.balances) ? data.balances : [],
     recentActivity: Array.isArray(data?.recentActivity) ? data.recentActivity : [],
     recentAuditLogs: Array.isArray(data?.recentAuditLogs) ? data.recentAuditLogs : [],
+  };
+}
+
+function normalizeMembershipRequest(request = {}) {
+  return {
+    membershipId: request.membershipId ?? null,
+    groupId: request.groupId ?? null,
+    groupCode: request.groupCode ?? "",
+    groupTitle: request.groupTitle ?? "",
+    subscriberId: request.subscriberId ?? null,
+    subscriberName: request.subscriberName ?? "",
+    memberNo: request.memberNo ?? null,
+    membershipStatus: request.membershipStatus ?? "pending",
+    requestedAt: request.requestedAt ?? null,
   };
 }
 
@@ -271,12 +292,39 @@ export default function OwnerDashboard() {
   const [payoutsLoading, setPayoutsLoading] = useState(true);
   const [error, setError] = useState("");
   const [payoutsError, setPayoutsError] = useState("");
+  const [membershipRequests, setMembershipRequests] = useState([]);
+  const [membershipRequestsError, setMembershipRequestsError] = useState("");
+  const [membershipRequestActionError, setMembershipRequestActionError] = useState("");
+  const [membershipRequestActionMessage, setMembershipRequestActionMessage] = useState("");
+  const [actingMembershipId, setActingMembershipId] = useState(null);
   const [payoutActionError, setPayoutActionError] = useState("");
   const [payoutActionMessage, setPayoutActionMessage] = useState("");
   const [settlingPayoutId, setSettlingPayoutId] = useState(null);
   const [creatingAuctionSession, setCreatingAuctionSession] = useState(false);
   const [auctionSessionMessage, setAuctionSessionMessage] = useState("");
   const [auctionSessionError, setAuctionSessionError] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [groupMessage, setGroupMessage] = useState("");
+  const [groupError, setGroupError] = useState("");
+  const [invitingSubscriber, setInvitingSubscriber] = useState(false);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteMessage, setInviteMessage] = useState("");
+  const [groupDraft, setGroupDraft] = useState({
+    groupCode: "",
+    title: "",
+    chitValue: "",
+    installmentAmount: "",
+    memberCount: "",
+    cycleCount: "",
+    cycleFrequency: "monthly",
+    visibility: "private",
+    startDate: "",
+    firstAuctionDate: "",
+  });
+  const [inviteDraft, setInviteDraft] = useState({
+    groupId: "",
+    phone: "",
+  });
   const [auctionSessionDraft, setAuctionSessionDraft] = useState({
     groupId: "",
     cycleNo: "1",
@@ -322,6 +370,24 @@ export default function OwnerDashboard() {
     }
   }, [currentOwnerId]);
 
+  const loadMembershipRequests = useCallback(async ({ reportError = true } = {}) => {
+    try {
+      const data = await fetchOwnerMembershipRequests();
+      setMembershipRequests(Array.isArray(data) ? data.map((item) => normalizeMembershipRequest(item)) : []);
+      return true;
+    } catch (membershipLoadError) {
+      if (reportError) {
+        setMembershipRequestsError(
+          getApiErrorMessage(membershipLoadError, {
+            fallbackMessage: "Unable to load membership requests right now.",
+          }),
+        );
+        return false;
+      }
+      throw membershipLoadError;
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
 
@@ -338,9 +404,14 @@ export default function OwnerDashboard() {
     setPayoutsLoading(true);
     setError("");
     setPayoutsError("");
+    setMembershipRequestsError("");
 
-    Promise.allSettled([loadDashboard({ reportError: false }), loadPayouts({ reportError: false })])
-      .then(([dashboardResult, payoutsResult]) => {
+    Promise.allSettled([
+      loadDashboard({ reportError: false }),
+      loadPayouts({ reportError: false }),
+      loadMembershipRequests({ reportError: false }),
+    ])
+      .then(([dashboardResult, payoutsResult, membershipRequestsResult]) => {
         if (!active) {
           return;
         }
@@ -359,6 +430,13 @@ export default function OwnerDashboard() {
           });
           setPayoutsError(detail);
         }
+
+        if (membershipRequestsResult.status === "rejected") {
+          const detail = getApiErrorMessage(membershipRequestsResult.reason, {
+            fallbackMessage: "Unable to load membership requests right now.",
+          });
+          setMembershipRequestsError(detail);
+        }
       })
       .finally(() => {
         if (active) {
@@ -370,7 +448,7 @@ export default function OwnerDashboard() {
     return () => {
       active = false;
     };
-  }, [currentOwnerId, isSignedIn, loadDashboard, loadPayouts]);
+  }, [currentOwnerId, isSignedIn, loadDashboard, loadMembershipRequests, loadPayouts]);
 
   useEffect(() => {
     if (!dashboard?.groups?.length) {
@@ -395,6 +473,10 @@ export default function OwnerDashboard() {
     const groups = dashboard?.groups ?? [];
     return new Map(groups.map((group) => [group.groupId, group]));
   }, [dashboard]);
+  const privateGroups = useMemo(
+    () => (dashboard?.groups ?? []).filter((group) => String(group.visibility ?? "private").toLowerCase() === "private"),
+    [dashboard],
+  );
   const shellContextLabel = useMemo(() => {
     if (!dashboard) {
       return "Groups, auctions, and collections";
@@ -409,6 +491,23 @@ export default function OwnerDashboard() {
   }, [dashboard]);
   const isFixedAuctionDraft = String(auctionSessionDraft.auctionMode ?? "LIVE").toUpperCase() === "FIXED";
   const draftBidRuleSummary = formatBidRuleSummary(auctionSessionDraft);
+
+  useEffect(() => {
+    if (!privateGroups.length) {
+      return;
+    }
+
+    setInviteDraft((currentDraft) => {
+      if (currentDraft.groupId) {
+        return currentDraft;
+      }
+
+      return {
+        ...currentDraft,
+        groupId: String(privateGroups[0].groupId),
+      };
+    });
+  }, [privateGroups]);
 
   useSignedInShellHeader({
     title: "Owner dashboard",
@@ -448,11 +547,126 @@ export default function OwnerDashboard() {
     }
   }
 
+  async function handleMembershipRequestAction(request, action) {
+    if (!request?.membershipId || !request?.groupId || actingMembershipId === request.membershipId) {
+      return;
+    }
+
+    const actionLabel = action === "approve" ? "approve" : "reject";
+    const requestName = request.subscriberName || `Member #${request.memberNo ?? request.membershipId}`;
+    setActingMembershipId(request.membershipId);
+    setMembershipRequestActionError("");
+    setMembershipRequestActionMessage("");
+
+    try {
+      if (action === "approve") {
+        await approveGroupMembershipRequest(request.groupId, request.membershipId);
+      } else {
+        await rejectGroupMembershipRequest(request.groupId, request.membershipId);
+      }
+      setMembershipRequests((currentRequests) =>
+        currentRequests.filter((item) => item.membershipId !== request.membershipId),
+      );
+      await loadDashboard({ reportError: false });
+      setMembershipRequestActionMessage(
+        `${actionLabel === "approve" ? "Approved" : "Rejected"} ${requestName} for ${request.groupTitle}.`,
+      );
+    } catch (actionError) {
+      setMembershipRequestActionError(
+        getApiErrorMessage(actionError, {
+          fallbackMessage: `Unable to ${actionLabel} this membership request right now.`,
+        }),
+      );
+    } finally {
+      setActingMembershipId(null);
+    }
+  }
+
   function updateAuctionSessionDraft(field, value) {
     setAuctionSessionDraft((currentDraft) => ({
       ...currentDraft,
       [field]: value,
     }));
+  }
+
+  function updateGroupDraft(field, value) {
+    setGroupDraft((currentDraft) => ({
+      ...currentDraft,
+      [field]: value,
+    }));
+  }
+
+  function updateInviteDraft(field, value) {
+    setInviteDraft((currentDraft) => ({
+      ...currentDraft,
+      [field]: value,
+    }));
+  }
+
+  async function handleCreateGroup(event) {
+    event.preventDefault();
+    if (creatingGroup) {
+      return;
+    }
+
+    const requiredFields = [
+      ["groupCode", "Enter a group code."],
+      ["title", "Enter a group title."],
+      ["chitValue", "Enter a chit value."],
+      ["installmentAmount", "Enter an installment amount."],
+      ["memberCount", "Enter a member count."],
+      ["cycleCount", "Enter a cycle count."],
+      ["startDate", "Choose a start date."],
+      ["firstAuctionDate", "Choose a first auction date."],
+    ];
+    const missingField = requiredFields.find(([field]) => !String(groupDraft[field] ?? "").trim());
+    if (missingField) {
+      setGroupError(missingField[1]);
+      return;
+    }
+
+    setCreatingGroup(true);
+    setGroupError("");
+    setGroupMessage("");
+
+    try {
+      const createdGroup = await createGroup({
+        ownerId: Number(currentOwnerId),
+        groupCode: groupDraft.groupCode.trim(),
+        title: groupDraft.title.trim(),
+        chitValue: Number(groupDraft.chitValue),
+        installmentAmount: Number(groupDraft.installmentAmount),
+        memberCount: Number(groupDraft.memberCount),
+        cycleCount: Number(groupDraft.cycleCount),
+        cycleFrequency: groupDraft.cycleFrequency,
+        visibility: groupDraft.visibility,
+        startDate: groupDraft.startDate,
+        firstAuctionDate: groupDraft.firstAuctionDate,
+      });
+      await loadDashboard({ reportError: false });
+      setGroupMessage(`Created ${createdGroup.title} as a ${createdGroup.visibility} chit group.`);
+      setGroupDraft({
+        groupCode: "",
+        title: "",
+        chitValue: "",
+        installmentAmount: "",
+        memberCount: "",
+        cycleCount: "",
+        cycleFrequency: "monthly",
+        visibility: "private",
+        startDate: "",
+        firstAuctionDate: "",
+      });
+      setAuctionSessionDraft((currentDraft) => ({
+        ...currentDraft,
+        groupId: String(createdGroup.id),
+        cycleNo: String(createdGroup.currentCycleNo ?? 1),
+      }));
+    } catch (createError) {
+      setGroupError(getApiErrorMessage(createError, { fallbackMessage: "Unable to create this chit group right now." }));
+    } finally {
+      setCreatingGroup(false);
+    }
   }
 
   async function handleCreateAuctionSession(event) {
@@ -537,6 +751,47 @@ export default function OwnerDashboard() {
     }
   }
 
+  async function handleInviteSubscriber(event) {
+    event.preventDefault();
+    if (invitingSubscriber) {
+      return;
+    }
+    if (!inviteDraft.groupId) {
+      setInviteError("Select a private group before sending an invite.");
+      return;
+    }
+    if (!String(inviteDraft.phone ?? "").trim()) {
+      setInviteError("Enter a subscriber phone number.");
+      return;
+    }
+
+    setInvitingSubscriber(true);
+    setInviteError("");
+    setInviteMessage("");
+
+    try {
+      const invitedMembership = await inviteSubscriberToGroup(Number(inviteDraft.groupId), inviteDraft.phone.trim());
+      const invitedGroup =
+        privateGroups.find((group) => String(group.groupId) === String(inviteDraft.groupId)) ??
+        groupById.get(Number(inviteDraft.groupId));
+      setInviteMessage(
+        `Invite sent for ${invitedGroup?.title ?? `Group #${inviteDraft.groupId}`}. Member #${invitedMembership.memberNo} is waiting for subscriber acceptance.`,
+      );
+      setInviteDraft((currentDraft) => ({
+        ...currentDraft,
+        phone: "",
+      }));
+    } catch (inviteSubmitError) {
+      setInviteError(
+        getApiErrorMessage(inviteSubmitError, {
+          fallbackMessage: "Unable to send this private-group invite right now.",
+        }),
+      );
+    } finally {
+      setInvitingSubscriber(false);
+    }
+  }
+
   return (
     <main className="page-shell">
       <header className="space-y-3" id="profile">
@@ -576,6 +831,171 @@ export default function OwnerDashboard() {
 
       {!loading && !error && dashboard ? (
         <>
+          <FormFrame
+            description="Create a chit group with the existing payout and auction rules, then decide whether it should be public or private."
+            error={groupError}
+            success={groupMessage}
+            title="Create Chit Group"
+          >
+            <form className="space-y-4" onSubmit={handleCreateGroup}>
+              <div className="grid gap-4 md:grid-cols-2">
+                <FormField htmlFor="groupCode" label="Group code">
+                  <input
+                    className="text-input"
+                    id="groupCode"
+                    onChange={(event) => updateGroupDraft("groupCode", event.target.value)}
+                    placeholder="MAY-001"
+                    type="text"
+                    value={groupDraft.groupCode}
+                  />
+                </FormField>
+                <FormField htmlFor="groupTitle" label="Title">
+                  <input
+                    className="text-input"
+                    id="groupTitle"
+                    onChange={(event) => updateGroupDraft("title", event.target.value)}
+                    placeholder="May Monthly Chit"
+                    type="text"
+                    value={groupDraft.title}
+                  />
+                </FormField>
+                <FormField htmlFor="groupChitValue" label="Chit value">
+                  <input
+                    className="text-input"
+                    id="groupChitValue"
+                    min="1"
+                    onChange={(event) => updateGroupDraft("chitValue", event.target.value)}
+                    type="number"
+                    value={groupDraft.chitValue}
+                  />
+                </FormField>
+                <FormField htmlFor="groupInstallmentAmount" label="Installment amount">
+                  <input
+                    className="text-input"
+                    id="groupInstallmentAmount"
+                    min="1"
+                    onChange={(event) => updateGroupDraft("installmentAmount", event.target.value)}
+                    type="number"
+                    value={groupDraft.installmentAmount}
+                  />
+                </FormField>
+                <FormField htmlFor="groupMemberCount" label="Member count">
+                  <input
+                    className="text-input"
+                    id="groupMemberCount"
+                    min="1"
+                    onChange={(event) => updateGroupDraft("memberCount", event.target.value)}
+                    type="number"
+                    value={groupDraft.memberCount}
+                  />
+                </FormField>
+                <FormField htmlFor="groupCycleCount" label="Cycle count">
+                  <input
+                    className="text-input"
+                    id="groupCycleCount"
+                    min="1"
+                    onChange={(event) => updateGroupDraft("cycleCount", event.target.value)}
+                    type="number"
+                    value={groupDraft.cycleCount}
+                  />
+                </FormField>
+                <FormField htmlFor="groupCycleFrequency" label="Cycle frequency">
+                  <select
+                    className="text-input"
+                    id="groupCycleFrequency"
+                    onChange={(event) => updateGroupDraft("cycleFrequency", event.target.value)}
+                    value={groupDraft.cycleFrequency}
+                  >
+                    <option value="monthly">Monthly</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </FormField>
+                <FormField htmlFor="groupVisibility" label="Visibility">
+                  <select
+                    className="text-input"
+                    id="groupVisibility"
+                    onChange={(event) => updateGroupDraft("visibility", event.target.value)}
+                    value={groupDraft.visibility}
+                  >
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                  </select>
+                </FormField>
+                <FormField htmlFor="groupStartDate" label="Start date">
+                  <input
+                    className="text-input"
+                    id="groupStartDate"
+                    onChange={(event) => updateGroupDraft("startDate", event.target.value)}
+                    type="date"
+                    value={groupDraft.startDate}
+                  />
+                </FormField>
+                <FormField htmlFor="groupFirstAuctionDate" label="First auction date">
+                  <input
+                    className="text-input"
+                    id="groupFirstAuctionDate"
+                    onChange={(event) => updateGroupDraft("firstAuctionDate", event.target.value)}
+                    type="date"
+                    value={groupDraft.firstAuctionDate}
+                  />
+                </FormField>
+              </div>
+              <FormActions note="Private groups stay owner-managed. Public groups become visible in the subscriber discovery list once they are active.">
+                <button className="action-button" disabled={creatingGroup} type="submit">
+                  {creatingGroup ? "Creating..." : "Create chit"}
+                </button>
+              </FormActions>
+            </form>
+          </FormFrame>
+
+          <FormFrame
+            description="Invite an existing subscriber into one of your private chit groups by phone number."
+            error={inviteError}
+            success={inviteMessage}
+            title="Send Private Invite"
+          >
+            {privateGroups.length === 0 ? (
+              <p>Create or keep at least one private chit group to send direct invites.</p>
+            ) : (
+              <form className="space-y-4" onSubmit={handleInviteSubscriber}>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FormField htmlFor="inviteGroupId" label="Private group">
+                    <select
+                      className="text-input"
+                      id="inviteGroupId"
+                      onChange={(event) => updateInviteDraft("groupId", event.target.value)}
+                      value={inviteDraft.groupId}
+                    >
+                      <option value="">Select a private group</option>
+                      {privateGroups.map((group) => (
+                        <option
+                          key={group.groupId}
+                          label={`${group.title} (${group.groupCode})`}
+                          value={group.groupId}
+                        />
+                      ))}
+                    </select>
+                  </FormField>
+                  <FormField htmlFor="invitePhone" label="Subscriber phone">
+                    <input
+                      className="text-input"
+                      id="invitePhone"
+                      onChange={(event) => updateInviteDraft("phone", event.target.value)}
+                      placeholder="8888888888"
+                      type="tel"
+                      value={inviteDraft.phone}
+                    />
+                  </FormField>
+                </div>
+                <FormActions note="Invites only work for private groups and only for subscribers who already have an account.">
+                  <button className="action-button" disabled={invitingSubscriber} type="submit">
+                    {invitingSubscriber ? "Sending..." : "Send invite"}
+                  </button>
+                </FormActions>
+              </form>
+            )}
+          </FormFrame>
+
           <FormFrame
             description="Create a new auction session with mode, timing, organizer commission settings, and optional bid rules."
             error={auctionSessionError}
@@ -744,6 +1164,53 @@ export default function OwnerDashboard() {
               </FormActions>
             </form>
           </FormFrame>
+
+          <section className="panel" id="membership-requests">
+            <h2>Membership requests</h2>
+            {membershipRequestsError ? <p>{membershipRequestsError}</p> : null}
+            {!membershipRequestsError && membershipRequests.length === 0 ? (
+              <p>No pending membership requests right now.</p>
+            ) : null}
+            {membershipRequests.length > 0 ? (
+              <div className="panel-grid">
+                {membershipRequests.map((request) => (
+                  <article className="panel space-y-3" key={request.membershipId}>
+                    <h3>{request.subscriberName || `Member #${request.memberNo ?? request.membershipId}`}</h3>
+                    <p>
+                      {request.groupTitle} · {request.groupCode}
+                    </p>
+                    <p>
+                      Member #{request.memberNo ?? "N/A"} · Requested {formatDateTime(request.requestedAt)}
+                    </p>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        className="action-button"
+                        disabled={actingMembershipId === request.membershipId}
+                        onClick={() => handleMembershipRequestAction(request, "approve")}
+                        type="button"
+                      >
+                        {actingMembershipId === request.membershipId ? "Updating..." : `Approve request for ${request.subscriberName || `Member #${request.memberNo ?? request.membershipId}`}`}
+                      </button>
+                      <button
+                        className="action-button"
+                        disabled={actingMembershipId === request.membershipId}
+                        onClick={() => handleMembershipRequestAction(request, "reject")}
+                        type="button"
+                      >
+                        {actingMembershipId === request.membershipId ? "Updating..." : `Reject request for ${request.subscriberName || `Member #${request.memberNo ?? request.membershipId}`}`}
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+            {membershipRequestActionMessage ? (
+              <p className="rounded-md bg-emerald-50 px-3 py-2 text-emerald-900">{membershipRequestActionMessage}</p>
+            ) : null}
+            {membershipRequestActionError ? (
+              <p className="rounded-md bg-red-50 px-3 py-2 text-red-900">{membershipRequestActionError}</p>
+            ) : null}
+          </section>
 
           <section className="panel" id="home">
             <h2>Groups</h2>

@@ -121,6 +121,63 @@ function readSession() {
   return session;
 }
 
+function normalizeRoles(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set();
+  return value.filter((role) => {
+    if (typeof role !== "string" || !role.trim() || seen.has(role)) {
+      return false;
+    }
+    seen.add(role);
+    return true;
+  });
+}
+
+export function getUserRoles(session = readSession()) {
+  const explicitRoles = normalizeRoles(session?.user?.roles);
+  if (explicitRoles.length > 0) {
+    return explicitRoles;
+  }
+
+  const legacyRoles = [];
+  if (
+    session?.role === "subscriber" ||
+    session?.subscriber_id ||
+    session?.subscriberId ||
+    session?.has_subscriber_profile ||
+    session?.hasSubscriberProfile
+  ) {
+    legacyRoles.push("subscriber");
+  }
+  if (session?.role === "chit_owner" || session?.role === "owner" || session?.owner_id || session?.ownerId) {
+    legacyRoles.push("owner");
+  }
+  if (session?.role === "admin") {
+    legacyRoles.push("admin");
+  }
+  return normalizeRoles(legacyRoles);
+}
+
+export function sessionHasRole(session, role) {
+  return getUserRoles(session).includes(role);
+}
+
+export function getDashboardPath(session = readSession()) {
+  if (sessionHasRole(session, "admin")) {
+    return "/admin/owner-requests";
+  }
+  if (sessionHasRole(session, "owner")) {
+    return "/owner";
+  }
+  if (sessionHasRole(session, "subscriber")) {
+    return "/subscriber";
+  }
+  return "/";
+}
+
 export function getCurrentUser() {
   return readSession();
 }
@@ -152,16 +209,30 @@ export function saveSession(session) {
   window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
 
+export function mergeSession(currentSession, nextSession) {
+  if (!nextSession || typeof nextSession !== "object" || Array.isArray(nextSession)) {
+    return currentSession ?? null;
+  }
+
+  return {
+    ...(currentSession ?? {}),
+    ...nextSession,
+    user: {
+      ...((currentSession ?? {}).user ?? {}),
+      ...(nextSession.user ?? {}),
+    },
+  };
+}
+
 export function updateSession(nextSession) {
   if (typeof window === "undefined") {
-    return;
+    return mergeSession(null, nextSession);
   }
 
   const currentSession = readSession() ?? {};
-  saveSession({
-    ...currentSession,
-    ...nextSession,
-  });
+  const mergedSession = mergeSession(currentSession, nextSession);
+  saveSession(mergedSession);
+  return mergedSession;
 }
 
 export function logout() {

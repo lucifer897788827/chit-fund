@@ -29,6 +29,11 @@ export async function refreshSession(payload = {}) {
   return data;
 }
 
+export async function fetchCurrentUser() {
+  const { data } = await apiClient.get("/auth/me");
+  return data;
+}
+
 export async function logoutUser() {
   try {
     await apiClient.post("/auth/logout", {

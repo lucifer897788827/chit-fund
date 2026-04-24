@@ -6,6 +6,67 @@ export async function fetchGroups() {
   return extractListItems(data);
 }
 
+export async function fetchPublicChits() {
+  const { data } = await apiClient.get("/chits/public");
+  return extractListItems(data);
+}
+
+export async function searchChitsByCode(groupCode) {
+  const normalizedGroupCode = String(groupCode ?? "").trim();
+  const { data } = await apiClient.get(`/chits/code/${encodeURIComponent(normalizedGroupCode)}`);
+  return extractListItems(data);
+}
+
+export async function fetchOwnerMembershipRequests() {
+  const { data } = await apiClient.get("/chits/owner/requests");
+  return extractListItems(data);
+}
+
+export async function inviteSubscriberToGroup(groupId, phone) {
+  const { data } = await apiClient.post(`/chits/${groupId}/invite`, {
+    phone,
+  });
+  return data;
+}
+
+export async function requestGroupMembership(groupId) {
+  const { data } = await apiClient.post(`/chits/${groupId}/request`);
+  return data;
+}
+
+export async function acceptGroupInvite(groupId, membershipId) {
+  const { data } = await apiClient.post(`/chits/${groupId}/accept-invite`, {
+    membershipId,
+  });
+  return data;
+}
+
+export async function rejectGroupInvite(groupId, membershipId) {
+  const { data } = await apiClient.post(`/chits/${groupId}/reject-invite`, {
+    membershipId,
+  });
+  return data;
+}
+
+export async function approveGroupMembershipRequest(groupId, membershipId) {
+  const { data } = await apiClient.post(`/chits/${groupId}/approve-member`, {
+    membershipId,
+  });
+  return data;
+}
+
+export async function rejectGroupMembershipRequest(groupId, membershipId) {
+  const { data } = await apiClient.post(`/chits/${groupId}/reject-member`, {
+    membershipId,
+  });
+  return data;
+}
+
+export async function createGroup(payload) {
+  const { data } = await apiClient.post("/groups", payload);
+  return data;
+}
+
 export async function createAuctionSession(groupId, payload) {
   const { data } = await apiClient.post(`/groups/${groupId}/auction-sessions`, payload);
   return data;

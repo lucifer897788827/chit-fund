@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 
 from app.core.security import CurrentUser
+from app.core.config import settings
 from app.models.auction import AuctionBid, AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, GroupMembership, Installment
 from app.models.money import Payout
@@ -238,29 +239,68 @@ def test_settle_owner_payout_creates_settlement_notifications(app, db_session):
 
 
 def test_password_reset_request_and_confirmation_create_notifications(app, db_session):
-    request_result = request_password_reset(db_session, "9999999999")
-    assert request_result["reset_token"] is not None
+    original_app_env = settings.app_env
+    settings.app_env = "development"
+    try:
+        request_result = request_password_reset(db_session, "9999999999")
+        assert request_result["reset_token"] is not None
 
-    request_notifications = db_session.scalars(
-        select(Notification).where(Notification.title == "Password reset requested")
-    ).all()
-    assert len(request_notifications) == 2
-    assert {notification.user_id for notification in request_notifications} == {1}
-    assert {notification.channel for notification in request_notifications} == {"in_app", "email"}
+        request_notifications = db_session.scalars(
+            select(Notification).where(Notification.title == "Password reset requested")
+        ).all()
+        assert len(request_notifications) == 2
+        assert {notification.user_id for notification in request_notifications} == {1}
+        assert {notification.channel for notification in request_notifications} == {"in_app", "email"}
 
-    confirm_result = confirm_password_reset(db_session, request_result["reset_token"], "reset-secret-123")
-    assert confirm_result["message"] == "Password has been reset"
+        confirm_result = confirm_password_reset(db_session, request_result["reset_token"], "reset-secret-123")
+        assert confirm_result["message"] == "Password has been reset"
 
-    all_notifications = db_session.scalars(
-        select(Notification).where(Notification.user_id == 1).order_by(Notification.id)
-    ).all()
+        all_notifications = db_session.scalars(
+            select(Notification).where(Notification.user_id == 1).order_by(Notification.id)
+        ).all()
 
-    assert len(all_notifications) == 4
-    assert [notification.title for notification in all_notifications[:2]] == [
-        "Password reset requested",
-        "Password reset requested",
-    ]
-    assert [notification.title for notification in all_notifications[2:]] == [
-        "Password reset completed",
-        "Password reset completed",
-    ]
+        assert len(all_notifications) == 4
+        assert [notification.title for notification in all_notifications[:2]] == [
+            "Password reset requested",
+            "Password reset requested",
+        ]
+        assert [notification.title for notification in all_notifications[2:]] == [
+            "Password reset completed",
+            "Password reset completed",
+        ]
+    finally:
+        settings.app_env = original_app_env
+
+
+def test_dispatch_staged_notifications_skips_broker_publish_when_not_eager(app, db_session, monkeypatch):
+    owner, subscriber, _group, _membership = _seed_group_membership(
+        db_session,
+        group_code="HOOK-DISPATCH-001",
+        title="Hook Dispatch Group",
+    )
+    notification = Notification(
+        user_id=owner.user_id,
+        owner_id=owner.id,
+        channel="email",
+        title=f"Dispatch test for {subscriber.full_name}",
+        message="Dispatch test payload",
+        status="pending",
+        created_at=datetime(2026, 7, 15, 10, 0, tzinfo=timezone.utc),
+    )
+    db_session.add(notification)
+    db_session.flush()
+    db_session.info["pending_notification_dispatch"] = [notification]
+
+    class _ShouldNotPublish:
+        def delay(self, _notification_id):
+            raise AssertionError("Broker publish should be skipped when celery is not eager")
+
+    from app.core.celery_app import celery_app
+
+    previous_task_always_eager = celery_app.conf.task_always_eager
+    monkeypatch.setattr("app.tasks.notification_tasks.queue_notification_delivery", _ShouldNotPublish())
+    celery_app.conf.task_always_eager = False
+    try:
+        dispatch_staged_notifications(db_session)
+    finally:
+        celery_app.conf.task_always_eager = previous_task_always_eager

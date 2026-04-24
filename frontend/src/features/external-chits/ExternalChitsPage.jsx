@@ -16,7 +16,7 @@ import {
 } from "./api";
 import { useSignedInShellHeader } from "../../components/signed-in-shell";
 import { getApiErrorMessage } from "../../lib/api-error";
-import { getCurrentUser } from "../../lib/auth/store";
+import { getCurrentUser, getDashboardPath } from "../../lib/auth/store";
 import { normalizeExternalChit, normalizeExternalChitList, normalizeExternalChitSummary } from "./utils";
 import { logoutUser } from "../auth/api";
 
@@ -342,7 +342,7 @@ export default function ExternalChitsPage() {
         <h1>My External Chits</h1>
         <p>Maintain private records for outside chits in one place.</p>
         <p>
-          <Link to={currentUser?.role === "chit_owner" ? "/owner" : "/subscriber"}>Back to dashboard</Link>
+          <Link to={getDashboardPath(currentUser)}>Back to dashboard</Link>
         </p>
         <button className="action-button" onClick={handleLogout} type="button">
           Log Out

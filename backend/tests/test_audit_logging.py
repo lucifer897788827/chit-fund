@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from app.core.security import CurrentUser
 from app.models import AuditLog, ChitGroup, GroupMembership, Installment, Owner, Payout, Subscriber, User
 from app.models.auction import AuctionBid, AuctionResult, AuctionSession
-from app.modules.auctions.service import finalize_auction, place_bid
+from app.modules.auctions.service import finalize_auction, finalize_auction_post_processing, place_bid
 from app.modules.groups.join_service import join_group
 from app.modules.payments.payout_service import settle_owner_payout
 from app.modules.payments.service import record_payment
@@ -46,6 +46,7 @@ def _seed_group(db_session, *, status: str = "active") -> ChitGroup:
         member_count=5,
         cycle_count=3,
         cycle_frequency="monthly",
+        visibility="public",
         start_date=date(2026, 5, 1),
         first_auction_date=date(2026, 5, 10),
         current_cycle_no=1,
@@ -140,7 +141,11 @@ def test_place_bid_records_audit_event(db_session, monkeypatch):
     assert audit_row.entity_id == str(result["bidId"])
     assert audit_row.actor_user_id == current_user.user.id
     assert audit_row.owner_id == group.owner_id
-    assert audit_row.metadata_json == f'{{"auctionSessionId":{session.id},"bidAmount":12000.0,"membershipId":{membership.id}}}'
+    assert json.loads(audit_row.metadata_json) == {
+        "auctionSessionId": session.id,
+        "bidAmount": 12000,
+        "membershipId": membership.id,
+    }
     assert json.loads(audit_row.before_json)["bidCount"] == 0
     assert json.loads(audit_row.after_json)["bidCount"] == 1
 
@@ -192,7 +197,13 @@ def test_record_payment_records_audit_event(db_session):
     assert audit_row.entity_id == str(result["id"])
     assert audit_row.actor_user_id == current_user.user.id
     assert audit_row.owner_id == group.owner_id
-    assert audit_row.metadata_json == f'{{"amount":5000.0,"groupId":{group.id},"paymentMethod":"upi","paymentType":"installment","subscriberId":{subscriber.id}}}'
+    assert json.loads(audit_row.metadata_json) == {
+        "amount": 5000,
+        "groupId": group.id,
+        "paymentMethod": "upi",
+        "paymentType": "installment",
+        "subscriberId": subscriber.id,
+    }
     before_payload = json.loads(audit_row.before_json)
     after_payload = json.loads(audit_row.after_json)
     assert before_payload["installment"]["status"] == "pending"
@@ -260,7 +271,7 @@ def test_finalize_auction_records_audit_event(db_session):
     assert audit_row.actor_user_id == current_user.user.id
     assert audit_row.owner_id == group.owner_id
     assert audit_row.metadata_json == f'{{"auctionSessionId":{session.id},"cycleNo":1,"winningBidId":{bid.id}}}'
-    assert json.loads(audit_row.before_json)["status"] == "open"
+    assert json.loads(audit_row.before_json)["status"] == "finalizing"
     assert json.loads(audit_row.after_json)["status"] == "finalized"
 
 
@@ -283,6 +294,8 @@ def test_settle_owner_payout_records_audit_event(db_session):
     current_user = _owner_current_user(db_session)
 
     finalize_result = finalize_auction(db_session, session.id, current_user)
+    queued_session_id = session.id
+    finalize_auction_post_processing(db_session, session_id=queued_session_id)
     auction_result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session.id))
     assert auction_result is not None
     payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == auction_result.id))

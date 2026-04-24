@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import date
+import time
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -16,6 +17,17 @@ def _login_headers(client: TestClient, phone: str, password: str) -> dict[str, s
     response = client.post("/api/auth/login", json={"phone": phone, "password": password})
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def _wait_for_payout(db_session, *, timeout_seconds: float = 2.0) -> Payout | None:
+    deadline = time.perf_counter() + timeout_seconds
+    while time.perf_counter() < deadline:
+        db_session.expire_all()
+        payout = db_session.scalar(select(Payout).where(Payout.auction_result_id.is_not(None)))
+        if payout is not None:
+            return payout
+        time.sleep(0.02)
+    return db_session.scalar(select(Payout).where(Payout.auction_result_id.is_not(None)))
 
 
 def test_batch7_full_system_flow_covers_auth_group_membership_auction_payment_and_monitoring(app, db_session):
@@ -70,8 +82,7 @@ def test_batch7_full_system_flow_covers_auth_group_membership_auction_payment_an
     assert finalize_response.status_code == 200
     assert finalize_response.json()["status"] == "finalized"
 
-    db_session.expire_all()
-    payout = db_session.scalar(select(Payout).where(Payout.auction_result_id.is_not(None)))
+    payout = _wait_for_payout(db_session)
     assert payout is not None
     payout_id = payout.id
     assert payout.status == "pending"

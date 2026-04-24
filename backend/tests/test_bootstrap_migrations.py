@@ -44,4 +44,5 @@ def test_bootstrap_database_stamps_existing_schema_before_upgrade(tmp_path, monk
     assert "users" in tables
     assert "alembic_version" in tables
     assert "membership_slots" in tables
-    assert revision == "20260422_0013"
+    assert "finalize_jobs" in tables
+    assert revision == "20260423_0021"

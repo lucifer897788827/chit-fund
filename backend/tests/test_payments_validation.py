@@ -355,7 +355,7 @@ def test_validate_payment_rejects_non_positive_amount(app, db_session):
         installmentId=None,
         paymentType="membership",
         paymentMethod="cash",
-        amount=0.01,
+        amount=1,
         paymentDate=date(2026, 5, 10),
         referenceNo=None,
     )

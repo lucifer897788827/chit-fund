@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import threading
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -7,6 +8,7 @@ from app.models.auction import AuctionBid, AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, GroupMembership, Installment
 from app.models.money import LedgerEntry, Payment, Payout
 from app.models.user import Owner, Subscriber, User
+from app.modules.payments import service as payment_service_module
 
 
 def _owner_headers(client: TestClient) -> dict[str, str]:
@@ -44,6 +46,73 @@ def _seed_installment_target(db_session):
         group_id=group.id,
         subscriber_id=subscriber.id,
         member_no=1,
+        membership_status="active",
+        prized_status="unprized",
+        can_bid=True,
+    )
+    db_session.add(membership)
+    db_session.flush()
+
+    installment = Installment(
+        group_id=group.id,
+        membership_id=membership.id,
+        cycle_no=1,
+        due_date=date(2026, 5, 1),
+        due_amount=1000,
+        penalty_amount=0,
+        paid_amount=0,
+        balance_amount=1000,
+        status="pending",
+    )
+    db_session.add(installment)
+    db_session.commit()
+    return subscriber, group, membership, installment
+
+
+def _seed_installment_target_for_self_signup_member(db_session):
+    subscriber_user = User(
+        email="self-signup@example.com",
+        phone="7777771111",
+        password_hash="not-used-in-test",
+        role="subscriber",
+        is_active=True,
+    )
+    db_session.add(subscriber_user)
+    db_session.flush()
+
+    subscriber = Subscriber(
+        user_id=subscriber_user.id,
+        owner_id=None,
+        full_name="Self Signup Subscriber",
+        phone="7777771111",
+        email="self-signup@example.com",
+        status="active",
+    )
+    db_session.add(subscriber)
+    db_session.flush()
+
+    group = ChitGroup(
+        owner_id=1,
+        group_code="PAY-API-SELF-001",
+        title="Self Signup Payment Chit",
+        chit_value=10000,
+        installment_amount=1000,
+        member_count=10,
+        cycle_count=3,
+        cycle_frequency="monthly",
+        start_date=date(2026, 5, 1),
+        first_auction_date=date(2026, 5, 10),
+        current_cycle_no=1,
+        bidding_enabled=True,
+        status="active",
+    )
+    db_session.add(group)
+    db_session.flush()
+
+    membership = GroupMembership(
+        group_id=group.id,
+        subscriber_id=subscriber.id,
+        member_no=2,
         membership_status="active",
         prized_status="unprized",
         can_bid=True,
@@ -232,6 +301,30 @@ def test_record_installment_payment_resolves_membership_without_installment_id(a
     assert float(installment.paid_amount) == 600.0
     assert float(installment.balance_amount) == 400.0
     assert installment.status == "partial"
+
+
+def test_record_installment_payment_allows_self_signup_member_of_owner_group(app, db_session):
+    subscriber, group, membership, installment = _seed_installment_target_for_self_signup_member(db_session)
+    client = TestClient(app)
+    payload = {
+        "ownerId": 1,
+        "subscriberId": subscriber.id,
+        "membershipId": membership.id,
+        "installmentId": installment.id,
+        "paymentType": "installment",
+        "paymentMethod": "upi",
+        "amount": 1000,
+        "paymentDate": "2026-05-10",
+        "referenceNo": "UPI-PAY-SELF-001",
+    }
+
+    response = client.post("/api/payments", headers=_owner_headers(client), json=payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["groupId"] == group.id
+    assert body["membershipId"] == membership.id
+    assert body["status"] == "recorded"
 
 
 def test_record_installment_payment_rejects_decimal_amounts(app, db_session):
@@ -564,3 +657,114 @@ def test_record_installment_payment_returns_penalty_breakdown(app, db_session):
     assert body["penaltyAmount"] == 250.0
     assert body["installmentBalanceAmount"] == 750.0
     assert body["arrearsAmount"] == 750.0
+
+
+def test_record_payment_rejects_unknown_type_and_method(app, db_session):
+    subscriber, _group, membership, installment = _seed_installment_target(db_session)
+    client = TestClient(app)
+    payload = {
+        "ownerId": 1,
+        "subscriberId": subscriber.id,
+        "membershipId": membership.id,
+        "installmentId": installment.id,
+        "paymentType": "mystery",
+        "paymentMethod": "telepathy",
+        "amount": 600,
+        "paymentDate": "2026-05-10",
+        "referenceNo": "UPI-PAY-INVALID-001",
+    }
+
+    response = client.post("/api/payments", headers=_owner_headers(client), json=payload)
+
+    assert response.status_code == 422
+
+
+def test_list_payouts_rejects_unknown_status_filter(app, db_session):
+    _seed_payout_target(db_session)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/payments/payouts",
+        headers=_owner_headers(client),
+        params={"status": "definitely-not-a-status"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_record_payment_rolls_back_on_mid_transaction_failure(app, db_session, monkeypatch):
+    subscriber, _group, membership, installment = _seed_installment_target(db_session)
+    client = TestClient(app, raise_server_exceptions=False)
+    payload = {
+        "ownerId": 1,
+        "subscriberId": subscriber.id,
+        "membershipId": membership.id,
+        "installmentId": installment.id,
+        "paymentType": "installment",
+        "paymentMethod": "upi",
+        "amount": 600,
+        "paymentDate": "2026-05-10",
+        "referenceNo": "UPI-PAY-ROLLBACK-001",
+    }
+
+    def _raise_after_write(*args, **kwargs):
+        raise RuntimeError("audit failed")
+
+    monkeypatch.setattr(payment_service_module, "log_audit_event", _raise_after_write)
+
+    response = client.post("/api/payments", headers=_owner_headers(client), json=payload)
+
+    assert response.status_code == 500
+    db_session.refresh(installment)
+    assert float(installment.paid_amount) == 0.0
+    assert float(installment.balance_amount) == 1000.0
+    assert db_session.scalar(select(Payment).where(Payment.reference_no == "UPI-PAY-ROLLBACK-001")) is None
+
+
+def test_concurrent_duplicate_payment_submission_returns_single_payment(app, db_session, monkeypatch):
+    subscriber, _group, membership, installment = _seed_installment_target(db_session)
+    payload = {
+        "ownerId": 1,
+        "subscriberId": subscriber.id,
+        "membershipId": membership.id,
+        "installmentId": installment.id,
+        "paymentType": "installment",
+        "paymentMethod": "upi",
+        "amount": 600,
+        "paymentDate": "2026-05-10",
+        "referenceNo": "UPI-PAY-CONCURRENT-001",
+    }
+    original_validate = payment_service_module.validate_payment_submission
+    barrier = threading.Barrier(2)
+    responses: list[int] = []
+
+    def _synchronized_validate(db, request_payload, current_user):
+        context = original_validate(db, request_payload, current_user)
+        barrier.wait(timeout=3)
+        return context
+
+    def _worker():
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/api/payments", headers=_owner_headers(client), json=payload)
+        responses.append(response.status_code)
+
+    monkeypatch.setattr(payment_service_module, "validate_payment_submission", _synchronized_validate)
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(responses) == [201, 409]
+    payments = db_session.scalars(
+        select(Payment).where(Payment.reference_no == "UPI-PAY-CONCURRENT-001")
+    ).all()
+    assert len(payments) == 1
+    ledger_entries = db_session.scalars(
+        select(LedgerEntry).where(
+            LedgerEntry.source_table == "payments",
+            LedgerEntry.source_id == payments[0].id,
+        )
+    ).all()
+    assert len(ledger_entries) == 1

@@ -97,6 +97,40 @@ def serialize_penalty_value(penalty_type: str | None, penalty_value) -> float | 
     return money_int(penalty_value)
 
 
+def _normalize_group_visibility(value: str | None) -> str:
+    normalized = (value or "private").strip().lower()
+    if normalized not in {"public", "private"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Visibility must be public or private",
+        )
+    return normalized
+
+
+def serialize_group(group: ChitGroup) -> dict:
+    return {
+        "id": group.id,
+        "ownerId": group.owner_id,
+        "groupCode": group.group_code,
+        "title": group.title,
+        "chitValue": money_int(group.chit_value),
+        "installmentAmount": money_int(group.installment_amount),
+        "memberCount": group.member_count,
+        "cycleCount": group.cycle_count,
+        "cycleFrequency": group.cycle_frequency,
+        "visibility": group.visibility,
+        "startDate": group.start_date,
+        "firstAuctionDate": group.first_auction_date,
+        "penaltyEnabled": group.penalty_enabled,
+        "penaltyType": group.penalty_type,
+        "penaltyValue": serialize_penalty_value(group.penalty_type, group.penalty_value),
+        "gracePeriodDays": group.grace_period_days,
+        "currentCycleNo": group.current_cycle_no,
+        "biddingEnabled": group.bidding_enabled,
+        "status": group.status,
+    }
+
+
 def create_group(db: Session, payload, current_user: CurrentUser):
     owner = require_owner(current_user)
     if payload.ownerId is not None and payload.ownerId != owner.id:
@@ -107,6 +141,7 @@ def create_group(db: Session, payload, current_user: CurrentUser):
         penalty_value=getattr(payload, "penaltyValue", None),
         grace_period_days=getattr(payload, "gracePeriodDays", 0),
     )
+    visibility = _normalize_group_visibility(getattr(payload, "visibility", "private"))
 
     group = ChitGroup(
         owner_id=owner.id,
@@ -117,6 +152,7 @@ def create_group(db: Session, payload, current_user: CurrentUser):
         member_count=payload.memberCount,
         cycle_count=payload.cycleCount,
         cycle_frequency=payload.cycleFrequency,
+        visibility=visibility,
         start_date=payload.startDate,
         first_auction_date=payload.firstAuctionDate,
         current_cycle_no=1,
@@ -125,7 +161,7 @@ def create_group(db: Session, payload, current_user: CurrentUser):
         penalty_type=penalty_config["penaltyType"],
         penalty_value=penalty_config["penaltyValue"],
         grace_period_days=penalty_config["gracePeriodDays"],
-        status="draft",
+        status="active" if visibility == "public" else "draft",
     )
     db.add(group)
     db.flush()
@@ -147,6 +183,7 @@ def create_group(db: Session, payload, current_user: CurrentUser):
             "installmentAmount": money_int(group.installment_amount),
             "memberCount": group.member_count,
             "cycleCount": group.cycle_count,
+            "visibility": group.visibility,
             "status": group.status,
             "penaltyEnabled": group.penalty_enabled,
             "penaltyType": group.penalty_type,
@@ -156,26 +193,7 @@ def create_group(db: Session, payload, current_user: CurrentUser):
     )
     db.commit()
     db.refresh(group)
-    return {
-        "id": group.id,
-        "ownerId": group.owner_id,
-        "groupCode": group.group_code,
-        "title": group.title,
-        "chitValue": money_int(group.chit_value),
-        "installmentAmount": money_int(group.installment_amount),
-        "memberCount": group.member_count,
-        "cycleCount": group.cycle_count,
-        "cycleFrequency": group.cycle_frequency,
-        "startDate": group.start_date,
-        "firstAuctionDate": group.first_auction_date,
-        "penaltyEnabled": group.penalty_enabled,
-        "penaltyType": group.penalty_type,
-        "penaltyValue": serialize_penalty_value(group.penalty_type, group.penalty_value),
-        "gracePeriodDays": group.grace_period_days,
-        "currentCycleNo": group.current_cycle_no,
-        "biddingEnabled": group.bidding_enabled,
-        "status": group.status,
-    }
+    return serialize_group(group)
 
 
 def list_groups(
@@ -194,52 +212,8 @@ def list_groups(
         total_count = count_statement(db, statement)
         groups = db.scalars(apply_pagination(statement, pagination)).all()
 
-    return [
-        {
-            "id": group.id,
-            "ownerId": group.owner_id,
-            "groupCode": group.group_code,
-            "title": group.title,
-            "chitValue": money_int(group.chit_value),
-            "installmentAmount": money_int(group.installment_amount),
-            "memberCount": group.member_count,
-            "cycleCount": group.cycle_count,
-            "cycleFrequency": group.cycle_frequency,
-            "startDate": group.start_date,
-            "firstAuctionDate": group.first_auction_date,
-            "penaltyEnabled": group.penalty_enabled,
-            "penaltyType": group.penalty_type,
-            "penaltyValue": serialize_penalty_value(group.penalty_type, group.penalty_value),
-            "gracePeriodDays": group.grace_period_days,
-            "currentCycleNo": group.current_cycle_no,
-            "biddingEnabled": group.bidding_enabled,
-            "status": group.status,
-        }
-        for group in groups
-    ] if pagination is None else build_paginated_response(
-        [
-            {
-                "id": group.id,
-                "ownerId": group.owner_id,
-                "groupCode": group.group_code,
-                "title": group.title,
-                "chitValue": money_int(group.chit_value),
-                "installmentAmount": money_int(group.installment_amount),
-                "memberCount": group.member_count,
-                "cycleCount": group.cycle_count,
-                "cycleFrequency": group.cycle_frequency,
-                "startDate": group.start_date,
-                "firstAuctionDate": group.first_auction_date,
-                "penaltyEnabled": group.penalty_enabled,
-                "penaltyType": group.penalty_type,
-                "penaltyValue": serialize_penalty_value(group.penalty_type, group.penalty_value),
-                "gracePeriodDays": group.grace_period_days,
-                "currentCycleNo": group.current_cycle_no,
-                "biddingEnabled": group.bidding_enabled,
-                "status": group.status,
-            }
-            for group in groups
-        ],
+    return [serialize_group(group) for group in groups] if pagination is None else build_paginated_response(
+        [serialize_group(group) for group in groups],
         pagination,
         total_count,
     )

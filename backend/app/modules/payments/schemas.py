@@ -1,9 +1,14 @@
 from datetime import date
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.money import parse_whole_amount
+
+
+PaymentType = Literal["installment", "membership"]
+PaymentMethod = Literal["cash", "upi", "bank_transfer", "cheque"]
 
 
 class PaymentCreate(BaseModel):
@@ -12,8 +17,8 @@ class PaymentCreate(BaseModel):
     membershipId: int | None = None
     installmentId: int | None = None
     cycleNo: int | None = None
-    paymentType: str
-    paymentMethod: str
+    paymentType: PaymentType
+    paymentMethod: PaymentMethod
     amount: int = Field(gt=0)
     paymentDate: date
     referenceNo: str | None = None

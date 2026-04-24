@@ -1,6 +1,6 @@
 import { Navigate } from "react-router-dom";
 
-import { getCurrentUser } from "./store";
+import { getCurrentUser, sessionHasRole } from "./store";
 
 function getOwnerId(currentUser) {
   return currentUser?.owner_id ?? currentUser?.ownerId ?? null;
@@ -25,15 +25,19 @@ function Guard({ children, canAccess }) {
 }
 
 export function canAccessOwnerRoutes(currentUser) {
-  return currentUser?.role === "chit_owner" || Boolean(getOwnerId(currentUser));
+  return sessionHasRole(currentUser, "owner") || Boolean(getOwnerId(currentUser));
 }
 
 export function canAccessSubscriberRoutes(currentUser) {
-  return currentUser?.role === "subscriber" || Boolean(getSubscriberId(currentUser)) || hasSubscriberProfile(currentUser);
+  return sessionHasRole(currentUser, "subscriber") || Boolean(getSubscriberId(currentUser)) || hasSubscriberProfile(currentUser);
 }
 
 export function canAccessAuthenticatedRoutes(currentUser) {
   return Boolean(currentUser?.access_token);
+}
+
+export function canAccessAdminRoutes(currentUser) {
+  return sessionHasRole(currentUser, "admin");
 }
 
 export function RequireOwner({ children }) {
@@ -46,4 +50,8 @@ export function RequireSubscriber({ children }) {
 
 export function RequireAuthenticated({ children }) {
   return <Guard canAccess={canAccessAuthenticatedRoutes}>{children}</Guard>;
+}
+
+export function RequireAdmin({ children }) {
+  return <Guard canAccess={canAccessAdminRoutes}>{children}</Guard>;
 }

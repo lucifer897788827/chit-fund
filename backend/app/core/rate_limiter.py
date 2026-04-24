@@ -73,6 +73,45 @@ class RedisFixedWindowRateLimiter:
 rate_limiter = RedisFixedWindowRateLimiter()
 
 
+def decode_rate_limit_subject(token: str) -> str | None:
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except (JWTError, ValueError):
+        return None
+
+    subject = payload.get("sub")
+    return str(subject) if subject else None
+
+
+def resolve_rate_limit_identity(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token:
+            subject = decode_rate_limit_subject(token)
+            if subject:
+                return f"user:{subject}"
+
+    client_host = request.client.host if request.client is not None else "unknown"
+    return f"ip:{client_host}"
+
+
+def enforce_request_rate_limit(
+    request: Request,
+    *,
+    family: str,
+    limit: int,
+    window_seconds: int,
+) -> tuple[bool, int, str]:
+    identity = resolve_rate_limit_identity(request)
+    allowed, retry_after = rate_limiter.allow(
+        f"{identity}:{family}",
+        limit,
+        window_seconds,
+    )
+    return allowed, retry_after, identity
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
@@ -99,25 +138,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return f"{identity}:{family}"
 
     def _request_identity(self, request: Request) -> str:
-        authorization = request.headers.get("authorization", "")
-        if authorization.lower().startswith("bearer "):
-            token = authorization[7:].strip()
-            if token:
-                subject = self._decode_subject(token)
-                if subject:
-                    return f"user:{subject}"
-
-        client_host = request.client.host if request.client is not None else "unknown"
-        return f"ip:{client_host}"
+        return resolve_rate_limit_identity(request)
 
     def _decode_subject(self, token: str) -> str | None:
-        try:
-            payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-        except (JWTError, ValueError):
-            return None
-
-        subject = payload.get("sub")
-        return str(subject) if subject else None
+        return decode_rate_limit_subject(token)
 
     def _route_family(self, path: str) -> str:
         segments = [segment for segment in path.split("/") if segment]

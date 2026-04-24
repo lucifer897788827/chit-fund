@@ -1,4 +1,6 @@
 from datetime import date, datetime, timezone
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,13 +10,16 @@ from sqlalchemy import inspect, select, text
 
 from app.core import config as config_module
 from app.core import database
+from app.core.logging import APP_LOGGER_NAME
 from app.core.security import hash_password
 from app.models import AuctionSession, ChitGroup, ExternalChit, GroupMembership, Installment, MembershipSlot, Owner, Subscriber, User
 
+logger = logging.getLogger(APP_LOGGER_NAME)
+
 
 def _schema_exists_without_alembic_version() -> bool:
-    with database.engine.connect() as connection:
-        table_names = set(inspect(connection).get_table_names())
+    with database.SessionLocal() as db:
+        table_names = set(inspect(db.connection()).get_table_names())
 
     if "alembic_version" in table_names:
         return False
@@ -191,8 +196,8 @@ def bootstrap_database() -> None:
 
 def check_database_readiness() -> dict[str, Any]:
     try:
-        with database.engine.connect() as connection:
-            connection.execute(text("select 1"))
+        with database.SessionLocal() as db:
+            db.execute(text("select 1"))
     except Exception as exc:  # pragma: no cover - exercised through health tests
         return {
             "ok": False,
@@ -260,16 +265,94 @@ def check_celery_broker_readiness() -> dict[str, Any]:
     }
 
 
+def check_configuration_readiness() -> dict[str, Any]:
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    database_url = str(config_module.settings.database_url or "")
+    jwt_secret = str(config_module.settings.jwt_secret or "")
+    cors_origins = [str(origin).strip() for origin in config_module.settings.cors_origins]
+    frontend_backend_url = str(os.getenv("REACT_APP_BACKEND_URL") or "").strip()
+
+    if config_module.settings.is_production_profile:
+        localhost_origins = [origin for origin in cors_origins if "localhost" in origin or "127.0.0.1" in origin]
+        wildcard_origins = [origin for origin in cors_origins if origin == "*"]
+        if not cors_origins:
+            issues.append("CORS_ORIGINS is empty")
+        if localhost_origins:
+            issues.append("CORS_ORIGINS contains localhost entries")
+        if wildcard_origins:
+            issues.append("CORS_ORIGINS contains wildcard entries")
+        if database_url.startswith("sqlite"):
+            issues.append("DATABASE_URL points to sqlite")
+        if "localhost" in database_url or "127.0.0.1" in database_url:
+            warnings.append("DATABASE_URL references localhost")
+        if len(jwt_secret) < 32 or jwt_secret.lower() in {"test", "test-secret", "secret", "changeme"}:
+            issues.append("JWT_SECRET is weak")
+        if frontend_backend_url:
+            if "localhost" in frontend_backend_url or "127.0.0.1" in frontend_backend_url:
+                issues.append("REACT_APP_BACKEND_URL points to localhost")
+        else:
+            warnings.append("REACT_APP_BACKEND_URL is not set")
+
+    status = "up" if not issues else "misconfigured"
+    payload: dict[str, Any] = {
+        "ok": not issues,
+        "status": status,
+    }
+    if issues:
+        payload["issues"] = issues
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
+def assert_startup_configuration_safe() -> None:
+    if not config_module.settings.is_production_profile:
+        return
+
+    configuration = check_configuration_readiness()
+    issues = configuration.get("issues") or []
+    if not issues:
+        return
+
+    issue_text = "; ".join(str(issue) for issue in issues)
+    logger.error(
+        "app.startup.configuration_invalid",
+        extra={
+            "event": "app.startup.configuration_invalid",
+            "issues": issues,
+        },
+    )
+    raise RuntimeError(f"Unsafe production configuration: {issue_text}")
+
+
+def check_finalize_worker_readiness() -> dict[str, Any]:
+    from app.tasks.auction_tasks import get_finalize_job_worker_health
+
+    worker_health = get_finalize_job_worker_health()
+    status = str(worker_health.get("status") or "unknown")
+    ok = status in {"ready", "idle", "degraded"}
+    return {
+        "ok": ok,
+        "status": status,
+        **worker_health,
+    }
+
+
 def build_runtime_readiness_report() -> dict[str, Any]:
     checks = {
         "database": check_database_readiness(),
         "redis": check_redis_readiness(),
         "celeryBroker": check_celery_broker_readiness(),
+        "configuration": check_configuration_readiness(),
+        "worker": check_finalize_worker_readiness(),
     }
-    ready = all(check["ok"] for check in checks.values())
+    ready = bool(checks["database"]["ok"] and checks["configuration"]["ok"])
+    status = "ok" if ready and all(check["ok"] for check in checks.values()) else "degraded"
 
     return {
-        "status": "ok" if ready else "degraded",
+        "status": status,
         "ready": ready,
         "environment": config_module.settings.app_env,
         "checks": checks,

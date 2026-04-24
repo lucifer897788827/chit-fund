@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.core.time import utcnow
+from app.models.chit import ChitGroup, GroupMembership
 from app.models.support import Notification
 from app.models.user import Owner, User
 
@@ -22,10 +23,10 @@ def _subscriber_headers(client: TestClient) -> dict[str, str]:
     return _auth_headers(client, "8888888888", "pass123")
 
 
-def _create_other_owner(db_session) -> Owner:
+def _create_other_owner(db_session, *, suffix: str = "1") -> Owner:
     other_user = User(
-        email="other-owner@example.com",
-        phone="7777777999",
+        email=f"other-owner-{suffix}@example.com",
+        phone=f"7777777{suffix.zfill(3)}",
         password_hash="unused",
         role="chit_owner",
         is_active=True,
@@ -117,6 +118,74 @@ def test_subscriber_notification_list_uses_subscriber_owner_scope(app, db_sessio
     assert response.status_code == 200
     body = response.json()
     assert [row["title"] for row in body] == ["Subscriber visible notification"]
+
+
+def test_subscriber_notification_list_allows_cross_owner_membership_scope(app, db_session):
+    member_owner = _create_other_owner(db_session, suffix="2")
+    hidden_owner = _create_other_owner(db_session, suffix="3")
+
+    member_owner_group = ChitGroup(
+        owner_id=member_owner.id,
+        group_code="NOTIFY-MEMBER-001",
+        title="Cross Owner Notifications Group",
+        chit_value=300000,
+        installment_amount=15000,
+        member_count=10,
+        cycle_count=10,
+        cycle_frequency="monthly",
+        visibility="private",
+        start_date=utcnow().date(),
+        first_auction_date=utcnow().date(),
+        current_cycle_no=1,
+        bidding_enabled=True,
+        status="active",
+    )
+    db_session.add(member_owner_group)
+    db_session.flush()
+
+    db_session.add(
+        GroupMembership(
+            group_id=member_owner_group.id,
+            subscriber_id=2,
+            member_no=1,
+            membership_status="active",
+        )
+    )
+    db_session.flush()
+
+    cross_owner_visible = Notification(
+        user_id=2,
+        owner_id=member_owner.id,
+        channel="in_app",
+        title="Cross owner visible notification",
+        message="Visible because the subscriber belongs to this owner's chit group",
+        status="pending",
+        created_at=utcnow(),
+    )
+    hidden = Notification(
+        user_id=2,
+        owner_id=hidden_owner.id,
+        channel="in_app",
+        title="Cross owner hidden notification",
+        message="Should stay hidden without a matching group membership",
+        status="pending",
+        created_at=utcnow(),
+    )
+    db_session.add_all([cross_owner_visible, hidden])
+    db_session.commit()
+
+    client = TestClient(app)
+    headers = _subscriber_headers(client)
+
+    response = client.get("/api/notifications", headers=headers)
+    assert response.status_code == 200
+    titles = [row["title"] for row in response.json()]
+    assert "Cross owner visible notification" in titles
+    assert "Cross owner hidden notification" not in titles
+
+    mark_read_response = client.patch(f"/api/notifications/{cross_owner_visible.id}/read", headers=headers)
+    assert mark_read_response.status_code == 200
+    assert mark_read_response.json()["status"] == "read"
 
 
 def test_mark_notification_read_updates_read_at_and_blocks_cross_owner_rows(app, db_session):

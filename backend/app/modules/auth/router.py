@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
 from app.modules.auth.schemas import (
+    AuthMeResponse,
     LoginRequest,
     LogoutRequest,
     PasswordResetConfirmRequest,
@@ -15,6 +16,7 @@ from app.modules.auth.schemas import (
     TokenResponse,
 )
 from app.modules.auth.service import (
+    build_auth_me_response,
     confirm_password_reset,
     login_user,
     logout_user,
@@ -48,6 +50,11 @@ async def logout(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     logout_user(db, current_user, payload.refresh_token)
+
+
+@router.get("/me", response_model=AuthMeResponse)
+async def me(current_user: CurrentUser = Depends(get_current_user)):
+    return build_auth_me_response(current_user)
 
 
 @router.post("/request-reset", response_model=PasswordResetRequestResponse)

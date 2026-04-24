@@ -36,13 +36,13 @@ test("buildMemberBalanceSummary calculates outstanding and credit amounts", () =
     shareReceivedAmount: null,
     finalPayableAmount: 9250,
     totalPayableAmount: 9250,
-    remainingAmount: 9250,
+    remainingAmount: 0,
     progress: {
-      totalDue: 25000,
+      totalDue: 9250,
       totalPaid: 15750,
-      remainingAmount: 9250,
-      percent: 63,
-      percentLabel: "63%",
+      remainingAmount: 0,
+      percent: 100,
+      percentLabel: "100%",
     },
     tone: {
       badge: "border-rose-200 bg-rose-50 text-rose-900",
@@ -62,8 +62,8 @@ test("buildMemberBalanceSummary calculates outstanding and credit amounts", () =
     shareReceivedLabel: null,
     finalPayableLabel: "Rs. 9,250",
     totalPayableLabel: "Rs. 9,250",
-    remainingAmountLabel: "Rs. 9,250",
-    progressLabel: "Rs. 15,750 paid / Rs. 9,250 remaining",
+    remainingAmountLabel: "Rs. 0",
+    progressLabel: "Rs. 15,750 paid / Rs. 0 remaining",
   });
 });
 
@@ -194,5 +194,5 @@ test("MemberBalanceSummary presents the summary without recalculating it", () =>
   expect(screen.getAllByText("Rs. 9,250").length).toBeGreaterThan(0);
   expect(screen.getByText("Paid")).toBeInTheDocument();
   expect(screen.getByText("Rs. 15,750")).toBeInTheDocument();
-  expect(screen.getByText(/paid \/ Rs\. 9,250 remaining/i)).toBeInTheDocument();
+  expect(screen.getByText(/paid \/ Rs\. 0 remaining/i)).toBeInTheDocument();
 });

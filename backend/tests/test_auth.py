@@ -6,10 +6,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.core.security import hash_password_reset_token, verify_password
+from app.core.security import hash_password, hash_password_reset_token, verify_password
 from app.core.time import utcnow
 from app.models.auth import RefreshToken
-from app.models.user import Subscriber, User
+from app.models.user import Owner, Subscriber, User
 from app.modules.auth import service as auth_service
 
 
@@ -68,8 +68,10 @@ def test_login_returns_access_token(app):
     assert body["access_token_expires_in"] == 900
     assert body["refresh_token_expires_in"] == 2592000
     assert body["role"] == "chit_owner"
+    assert body["roles"] == ["subscriber", "owner"]
     assert body["owner_id"] == 1
     assert body["has_subscriber_profile"] is True
+    assert body["user"] == {"id": 1, "roles": ["subscriber", "owner"]}
     claims = jwt.decode(body["access_token"], settings.jwt_secret, algorithms=["HS256"])
     assert claims["sub"] == "1"
     assert claims["typ"] == "access"
@@ -132,6 +134,8 @@ def test_refresh_rotates_refresh_token(app, db_session):
     assert refresh_body["access_token"] != login_body["access_token"]
     assert refresh_body["refresh_token"] != original_refresh_token
     assert refresh_body["role"] == "chit_owner"
+    assert refresh_body["roles"] == ["subscriber", "owner"]
+    assert refresh_body["user"] == {"id": 1, "roles": ["subscriber", "owner"]}
 
     rejected = client.post(
         "/api/auth/refresh",
@@ -363,6 +367,30 @@ def test_password_reset_token_expiry_rejects_confirmation(app, db_session):
         settings.app_env = original_app_env
 
 
+def test_password_reset_confirm_rejects_short_password(app, db_session):
+    original_app_env = settings.app_env
+    settings.app_env = "development"
+    client = TestClient(app)
+    try:
+        request_response = client.post("/api/auth/request-reset", json={"phone": "9999999999"})
+        token = request_response.json()["reset_token"]
+
+        response = client.post(
+            "/api/auth/confirm-reset",
+            json={"token": token, "new_password": "short"},
+        )
+
+        assert response.status_code == 422
+
+        old_login_response = client.post(
+            "/api/auth/login",
+            json={"phone": "9999999999", "password": "secret123"},
+        )
+        assert old_login_response.status_code == 200
+    finally:
+        settings.app_env = original_app_env
+
+
 def test_signup_creates_subscriber_account_and_hashes_password(app, db_session):
     client = TestClient(app)
     response = client.post(
@@ -383,6 +411,7 @@ def test_signup_creates_subscriber_account_and_hashes_password(app, db_session):
     assert body["owner_id"] is None
     assert body["subscriber_id"] is not None
     assert body["has_subscriber_profile"] is True
+    assert body["user"]["roles"] == ["subscriber"]
 
     user = db_session.scalar(select(User).where(User.phone == "7777777000"))
     subscriber = db_session.scalar(select(Subscriber).where(Subscriber.phone == "7777777000"))
@@ -397,6 +426,99 @@ def test_signup_creates_subscriber_account_and_hashes_password(app, db_session):
         json={"phone": "7777777000", "password": "signup-pass-123"},
     )
     assert login_response.status_code == 200
+
+
+def test_login_resolves_roles_for_subscriber_only_and_owner_only_users(app, db_session):
+    owner_only_user = User(
+        email="owner-only@example.com",
+        phone="7777777001",
+        password_hash=hash_password("owner-only-pass"),
+        role="chit_owner",
+        is_active=True,
+    )
+    db_session.add(owner_only_user)
+    db_session.flush()
+    db_session.add(
+        Owner(
+            user_id=owner_only_user.id,
+            display_name="Owner Only",
+            business_name="Owner Only Chits",
+            city="Chennai",
+            state="Tamil Nadu",
+            status="active",
+        )
+    )
+    db_session.commit()
+
+    client = TestClient(app)
+
+    subscriber_response = client.post(
+        "/api/auth/login",
+        json={"phone": "8888888888", "password": "pass123"},
+    )
+    assert subscriber_response.status_code == 200
+    assert subscriber_response.json()["user"] == {"id": 2, "roles": ["subscriber"]}
+
+    owner_only_response = client.post(
+        "/api/auth/login",
+        json={"phone": "7777777001", "password": "owner-only-pass"},
+    )
+    assert owner_only_response.status_code == 200
+    assert owner_only_response.json()["user"] == {"id": 3, "roles": ["owner"]}
+
+
+def test_auth_me_returns_resolved_roles_for_current_user(app):
+    client = TestClient(app)
+    login_response = client.post(
+        "/api/auth/login",
+        json={"phone": "9999999999", "password": "secret123"},
+    )
+    assert login_response.status_code == 200
+
+    response = client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {login_response.json()['access_token']}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["role"] == "chit_owner"
+    assert response.json()["roles"] == ["subscriber", "owner"]
+    assert response.json()["owner_id"] == 1
+    assert response.json()["subscriber_id"] == 1
+    assert response.json()["user"] == {"id": 1, "roles": ["subscriber", "owner"]}
+
+
+def test_auth_me_updates_roles_immediately_after_owner_profile_insert(app, db_session):
+    subscriber_user = db_session.scalar(select(User).where(User.phone == "8888888888"))
+    assert subscriber_user is not None
+
+    owner = Owner(
+        user_id=subscriber_user.id,
+        display_name="Subscriber Turned Owner",
+        business_name="Subscriber Turned Owner Chits",
+        city="Coimbatore",
+        state="Tamil Nadu",
+        status="active",
+    )
+    db_session.add(owner)
+    db_session.commit()
+
+    client = TestClient(app)
+    login_response = client.post(
+        "/api/auth/login",
+        json={"phone": "8888888888", "password": "pass123"},
+    )
+    assert login_response.status_code == 200
+
+    response = client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {login_response.json()['access_token']}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["role"] == "chit_owner"
+    assert response.json()["roles"] == ["subscriber", "owner"]
+    assert response.json()["user"] == {"id": subscriber_user.id, "roles": ["subscriber", "owner"]}
 
 
 def test_signup_rejects_duplicate_phone(app):

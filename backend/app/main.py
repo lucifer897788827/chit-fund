@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from time import perf_counter
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
@@ -11,11 +12,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core import database
-from app.core.bootstrap import bootstrap_database, build_runtime_readiness_report
+from app.core.bootstrap import assert_startup_configuration_safe, bootstrap_database, build_runtime_readiness_report
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.rate_limiter import RateLimitMiddleware
 from app.core.websocket import connection_manager
+from app.modules.admin.router import router as admin_router
 from app.modules.auctions.router import router as auctions_router
 from app.modules.auctions.realtime_router import router as auctions_realtime_router
 from app.modules.auctions.realtime_service import (
@@ -25,10 +27,12 @@ from app.modules.auctions.realtime_service import (
     subscribe_to_all_auction_events,
 )
 from app.modules.auth.router import router as auth_router
+from app.modules.chits.router import router as chits_router
 from app.modules.external_chits.router import router as external_chits_router
 from app.modules.groups.router import router as groups_router
 from app.modules.job_tracking.router import router as job_tracking_router
 from app.modules.notifications.router import router as notifications_router
+from app.modules.owner_requests.router import router as owner_requests_router
 from app.modules.payments.router import router as payments_router
 from app.modules.reporting.router import router as reporting_router
 from app.modules.subscribers.router import router as subscribers_router
@@ -40,6 +44,12 @@ app_logger = configure_logging(
     structured_logging=settings.structured_logging,
     level=settings.log_level,
 )
+_REQUEST_METRICS_LOCK = Lock()
+_REQUEST_METRICS = {
+    "requests_total": 0,
+    "errors_total": 0,
+    "duration_ms_total": 0.0,
+}
 
 
 async def _relay_auction_realtime_events(stop_event: asyncio.Event):
@@ -67,6 +77,7 @@ async def _relay_auction_realtime_events(stop_event: asyncio.Event):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    assert_startup_configuration_safe()
     bootstrap_database()
     stop_event = asyncio.Event()
     realtime_task = asyncio.create_task(_relay_auction_realtime_events(stop_event))
@@ -104,9 +115,12 @@ def create_app() -> FastAPI:
     application.add_middleware(RateLimitMiddleware)
 
     application.include_router(auth_router)
+    application.include_router(admin_router)
+    application.include_router(chits_router)
     application.include_router(subscribers_router)
     application.include_router(support_router)
     application.include_router(groups_router)
+    application.include_router(owner_requests_router)
     application.include_router(job_tracking_router)
     application.include_router(notifications_router)
     application.include_router(auctions_router)
@@ -119,6 +133,8 @@ def create_app() -> FastAPI:
     async def request_logging_middleware(request: Request, call_next):
         request_id = request.headers.get("x-request-id") or uuid4().hex
         started_at = perf_counter()
+        with _REQUEST_METRICS_LOCK:
+            _REQUEST_METRICS["requests_total"] += 1
         request_context = {
             "event": "http.request.started",
             "request_id": request_id,
@@ -131,6 +147,8 @@ def create_app() -> FastAPI:
         try:
             response = await call_next(request)
         except Exception:
+            with _REQUEST_METRICS_LOCK:
+                _REQUEST_METRICS["errors_total"] += 1
             app_logger.exception(
                 "http.request.failed",
                 extra={
@@ -144,6 +162,10 @@ def create_app() -> FastAPI:
             raise
 
         duration_ms = round((perf_counter() - started_at) * 1000, 2)
+        with _REQUEST_METRICS_LOCK:
+            _REQUEST_METRICS["duration_ms_total"] += duration_ms
+            if response.status_code >= 500:
+                _REQUEST_METRICS["errors_total"] += 1
         app_logger.info(
             "http.request.completed",
             extra={
@@ -169,13 +191,44 @@ def create_app() -> FastAPI:
         status_code = 200 if report["ready"] or not settings.is_production_profile else 503
         return JSONResponse(content=report, status_code=status_code)
 
+    @application.get("/api/readiness")
+    async def readiness_alias():
+        return await readiness()
+
+    @application.get("/api/metrics")
+    async def metrics():
+        with _REQUEST_METRICS_LOCK:
+            request_count = int(_REQUEST_METRICS["requests_total"])
+            error_count = int(_REQUEST_METRICS["errors_total"])
+            duration_ms_total = float(_REQUEST_METRICS["duration_ms_total"])
+        average_duration_ms = round(duration_ms_total / request_count, 2) if request_count else 0.0
+        error_rate = round(error_count / request_count, 4) if request_count else 0.0
+        return {
+            "requestsTotal": request_count,
+            "errorsTotal": error_count,
+            "errorRate": error_rate,
+            "averageDurationMs": average_duration_ms,
+        }
+
     @application.get("/api/db-test")
     async def db_test():
         try:
-            with database.engine.connect() as connection:
-                connection.execute(text("select 1"))
+            with database.SessionLocal() as db:
+                db.execute(text("select 1"))
         except Exception as exc:  # pragma: no cover - exercised in integration only
-            return {"status": "error", "database": "unreachable", "detail": str(exc)}
+            app_logger.exception(
+                "db.test.failed",
+                extra={
+                    "event": "db.test.failed",
+                },
+            )
+            payload = {
+                "status": "error",
+                "database": "unreachable",
+            }
+            if not settings.is_production_profile:
+                payload["detail"] = str(exc)
+            return JSONResponse(content=payload, status_code=503)
 
         return {"status": "ok", "database": "connected"}
 

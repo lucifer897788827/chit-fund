@@ -1,13 +1,13 @@
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.money import money_int
 from app.models.auction import AuctionBid, AuctionResult, AuctionSession
-from app.models.chit import ChitGroup, GroupMembership
+from app.models.chit import ChitGroup, GroupMembership, MembershipSlot
+from app.models.user import Subscriber
 from app.modules.auctions.commission_service import calculate_owner_commission_amount
-from app.modules.groups.slot_service import build_membership_slot_summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +35,46 @@ class AuctionPayoutCalculation:
     membership_payables: tuple[MembershipPayableBreakdown, ...]
 
 
+def _build_membership_slot_count_map(
+    db: Session,
+    memberships: list[GroupMembership],
+) -> dict[int, int]:
+    if not memberships:
+        return {}
+
+    subscriber_ids = sorted({membership.subscriber_id for membership in memberships})
+    subscriber_user_ids = {
+        int(subscriber_id): int(user_id)
+        for subscriber_id, user_id in db.execute(
+            select(Subscriber.id, Subscriber.user_id).where(Subscriber.id.in_(subscriber_ids))
+        ).all()
+    }
+    user_ids = sorted({user_id for user_id in subscriber_user_ids.values()})
+    if not user_ids:
+        return {membership.id: 1 for membership in memberships}
+
+    slot_counts_by_user_id = {
+        int(user_id): int(slot_count)
+        for user_id, slot_count in db.execute(
+            select(
+                MembershipSlot.user_id,
+                func.count(MembershipSlot.id),
+            )
+            .where(
+                MembershipSlot.group_id == memberships[0].group_id,
+                MembershipSlot.user_id.in_(user_ids),
+            )
+            .group_by(MembershipSlot.user_id)
+        ).all()
+    }
+
+    membership_slot_counts: dict[int, int] = {}
+    for membership in memberships:
+        user_id = subscriber_user_ids.get(int(membership.subscriber_id))
+        membership_slot_counts[membership.id] = max(int(slot_counts_by_user_id.get(user_id, 0)), 1)
+    return membership_slot_counts
+
+
 def calculate_payout(
     db: Session,
     *,
@@ -54,13 +94,13 @@ def calculate_payout(
             .where(GroupMembership.group_id == group.id)
             .order_by(GroupMembership.member_no.asc(), GroupMembership.id.asc())
         ).all()
+        membership_slot_counts = _build_membership_slot_count_map(db, memberships)
 
         membership_payables: list[MembershipPayableBreakdown] = []
         winner_slot_count = 1
         winner_member_payable_amount = installment_amount
         for membership in memberships:
-            slot_summary = build_membership_slot_summary(db, membership)
-            slot_count = max(int(slot_summary.total_slots), 1)
+            slot_count = membership_slot_counts.get(membership.id, 1)
             member_payable_amount = installment_amount * slot_count
             membership_payables.append(
                 MembershipPayableBreakdown(
@@ -109,14 +149,14 @@ def calculate_payout(
         .where(GroupMembership.group_id == group.id)
         .order_by(GroupMembership.member_no.asc(), GroupMembership.id.asc())
     ).all()
+    membership_slot_counts = _build_membership_slot_count_map(db, memberships)
 
     membership_payables: list[MembershipPayableBreakdown] = []
     winner_slot_count = 1
     winner_member_payable_amount = installment_amount - share_per_slot_amount
 
     for membership in memberships:
-        slot_summary = build_membership_slot_summary(db, membership)
-        slot_count = max(int(slot_summary.total_slots), 1)
+        slot_count = membership_slot_counts.get(membership.id, 1)
         member_payable_amount = (installment_amount * slot_count) - (share_per_slot_amount * slot_count)
         membership_payables.append(
             MembershipPayableBreakdown(
@@ -164,11 +204,11 @@ def build_membership_payables_from_result(
         .where(GroupMembership.group_id == payout_group.id)
         .order_by(GroupMembership.member_no.asc(), GroupMembership.id.asc())
     ).all()
+    membership_slot_counts = _build_membership_slot_count_map(db, memberships)
 
     payables: list[MembershipPayableBreakdown] = []
     for membership in memberships:
-        slot_summary = build_membership_slot_summary(db, membership)
-        slot_count = max(int(slot_summary.total_slots), 1)
+        slot_count = membership_slot_counts.get(membership.id, 1)
         member_payable_amount = (installment_amount * slot_count) - (share_per_slot_amount * slot_count)
         payables.append(
             MembershipPayableBreakdown(

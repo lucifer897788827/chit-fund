@@ -15,6 +15,10 @@ def _build_engine(database_url: str):
             pool_pre_ping=True,
         )
 
+    connect_args = {}
+    if settings.database_statement_timeout_ms is not None and "postgres" in database_url:
+        connect_args["options"] = f"-c statement_timeout={int(settings.database_statement_timeout_ms)}"
+
     return create_engine(
         database_url,
         future=True,
@@ -24,6 +28,7 @@ def _build_engine(database_url: str):
         pool_timeout=settings.database_pool_timeout_seconds,
         pool_recycle=settings.database_pool_recycle_seconds,
         pool_use_lifo=True,
+        connect_args=connect_args,
     )
 
 

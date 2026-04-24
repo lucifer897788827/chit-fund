@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, worker_ready
 
 from app.core.bootstrap import bootstrap_database
 from app.core import config as config_module
+from app.core.logging import APP_LOGGER_NAME
 
 DEFAULT_BROKER_URL = "redis://localhost:6379/0"
 DEFAULT_RESULT_BACKEND = "redis://localhost:6379/0"
+logger = logging.getLogger(APP_LOGGER_NAME)
 
 
 def _setting_value(name: str, default: Any = None) -> Any:
@@ -74,6 +77,8 @@ def get_celery_config() -> dict[str, Any]:
         "worker_hijack_root_logger": False,
         "task_always_eager": task_always_eager,
         "broker_pool_limit": int(_setting_value("celery_broker_pool_limit", 10)),
+        "task_soft_time_limit": int(_setting_value("finalize_job_time_limit_seconds", 60)),
+        "task_time_limit": int(max(int(_setting_value("finalize_job_time_limit_seconds", 60)) + 15, 30)),
         "broker_transport_options": redis_transport_options,
         "result_backend_transport_options": dict(redis_transport_options),
         "app_name": app_name,
@@ -97,6 +102,14 @@ def build_celery_app() -> Celery:
     celery_app.conf.task_default_routing_key = _setting_value("celery_default_routing_key", "default")
     celery_app.conf.worker_state_db = _setting_value("celery_worker_state_db", None)
     celery_app.conf.beat_schedule = {
+        "auctions-process-finalize-jobs": {
+            "task": "auctions.process_finalize_jobs",
+            "schedule": 30,
+        },
+        "auctions-reconcile-incomplete-auctions": {
+            "task": "auctions.reconcile_incomplete_auctions",
+            "schedule": max(60, int(_setting_value("celery_reconcile_incomplete_auctions_interval_seconds", 300))),
+        },
         "auctions-auto-close-expired-sessions": {
             "task": "auctions.auto_close_expired_sessions",
             "schedule": max(30, int(_setting_value("celery_auto_close_interval_seconds", 60))),
@@ -139,4 +152,36 @@ from app.modules.job_tracking import signals as _job_tracking_signals  # noqa: F
 
 @worker_process_init.connect(weak=False)
 def worker_process_init_handler(sender: Any = None, **kwargs: Any) -> None:
-    bootstrap_database()
+    logger.info(
+        "worker.bootstrap.starting",
+        extra={"event": "worker.bootstrap.starting"},
+    )
+    try:
+        bootstrap_database()
+    except Exception:
+        logger.exception(
+            "worker.bootstrap.failed",
+            extra={"event": "worker.bootstrap.failed"},
+        )
+        raise
+    logger.info(
+        "worker.bootstrap.ready",
+        extra={"event": "worker.bootstrap.ready"},
+    )
+
+
+@worker_ready.connect(weak=False)
+def process_pending_on_start(sender: Any = None, **kwargs: Any) -> None:
+    logger.info(
+        "Finalize worker startup recovery triggered",
+        extra={"event": "auction.finalize.recovery_scan.startup_triggered"},
+    )
+    try:
+        from app.tasks.auction_tasks import process_pending_finalize_jobs
+
+        process_pending_finalize_jobs(reason="worker_ready")
+    except Exception:
+        logger.exception(
+            "Finalize worker startup recovery failed to start",
+            extra={"event": "auction.finalize.recovery_scan.startup_failed"},
+        )

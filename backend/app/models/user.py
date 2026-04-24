@@ -46,3 +46,12 @@ class Subscriber(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     address_text: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="active")
+
+
+class OwnerRequest(Base):
+    __tablename__ = "owner_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

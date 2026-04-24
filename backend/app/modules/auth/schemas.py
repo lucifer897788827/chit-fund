@@ -27,6 +27,11 @@ class SignupRequest(BaseModel):
     password: str = Field(min_length=8)
 
 
+class AuthenticatedUserResponse(BaseModel):
+    id: int
+    roles: list[str]
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -35,9 +40,20 @@ class TokenResponse(BaseModel):
     access_token_expires_in: int = 900
     refresh_token_expires_in: int = 2592000
     role: str
+    roles: list[str]
     owner_id: int | None = None
     subscriber_id: int | None = None
     has_subscriber_profile: bool = False
+    user: AuthenticatedUserResponse
+
+
+class AuthMeResponse(BaseModel):
+    role: str
+    roles: list[str]
+    owner_id: int | None = None
+    subscriber_id: int | None = None
+    has_subscriber_profile: bool = False
+    user: AuthenticatedUserResponse
 
 
 class PasswordResetRequest(BaseModel):
@@ -52,7 +68,7 @@ class PasswordResetRequestResponse(BaseModel):
 
 class PasswordResetConfirmRequest(BaseModel):
     token: str
-    new_password: str
+    new_password: str = Field(min_length=8)
 
 
 class PasswordResetConfirmResponse(BaseModel):

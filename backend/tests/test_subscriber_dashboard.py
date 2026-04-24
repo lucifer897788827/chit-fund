@@ -205,6 +205,7 @@ def test_subscriber_dashboard_marks_prized_membership_unavailable_for_future_cyc
     db_session.commit()
 
     create_auction_result(db_session, session_id=finalized_session.id, finalized_by_user_id=1)
+    db_session.commit()
     monkeypatch.setattr(
         "app.modules.subscribers.service.utcnow",
         lambda: datetime(2026, 4, 20, 10, 6, tzinfo=timezone.utc),
@@ -381,3 +382,20 @@ def test_subscriber_dashboard_forbids_owner_without_subscriber_profile(app):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Subscriber profile required"
+
+
+def test_subscriber_dashboard_forbids_owner_with_subscriber_profile(app):
+    client = TestClient(app)
+    login_response = client.post(
+        "/api/auth/login",
+        json={"phone": "9999999999", "password": "secret123"},
+    )
+    assert login_response.status_code == 200
+
+    response = client.get(
+        "/api/subscribers/dashboard",
+        headers={"Authorization": f"Bearer {login_response.json()['access_token']}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Subscriber-only access required"

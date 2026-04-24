@@ -1,11 +1,15 @@
 from datetime import date, datetime, timedelta, timezone
+import threading
+import time
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.models.auction import AuctionBid, AuctionResult, AuctionSession
+from app.core import database
+import app.modules.auctions.service as auction_service_module
+from app.models.auction import AuctionBid, AuctionResult, AuctionSession, FinalizeJob
 from app.models.chit import ChitGroup, GroupMembership, MembershipSlot
-from app.core.security import hash_password
+from app.core.security import CurrentUser, hash_password
 from app.models import LedgerEntry, Owner, Payout, Subscriber, User
 
 try:
@@ -132,6 +136,26 @@ def _seed_second_owner(db_session) -> None:
     db_session.commit()
 
 
+def _wait_for_payout(db_session, auction_result_id: int, *, timeout_seconds: float = 2.0):
+    deadline = time.perf_counter() + timeout_seconds
+    while time.perf_counter() < deadline:
+        db_session.expire_all()
+        payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == auction_result_id))
+        if payout is not None:
+            return payout
+        time.sleep(0.02)
+    return db_session.scalar(select(Payout).where(Payout.auction_result_id == auction_result_id))
+
+
+def _owner_current_user(db_session) -> CurrentUser:
+    user = db_session.get(User, 1)
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == 1))
+    subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == 1))
+    assert user is not None
+    assert owner is not None
+    return CurrentUser(user=user, owner=owner, subscriber=subscriber)
+
+
 def test_get_room_payload(app, db_session):
     session_id, membership_id, group_id = _seed_live_auction(db_session, slot_count=3)
     client = TestClient(app)
@@ -168,6 +192,19 @@ def test_post_bid_returns_acceptance(app, db_session):
     bid = db_session.scalar(select(AuctionBid).where(AuctionBid.auction_session_id == session_id))
     assert bid is not None
     assert float(bid.bid_amount) == 12000.0
+
+
+def test_post_bid_rejects_blank_idempotency_key(app, db_session):
+    session_id, membership_id, _group_id = _seed_live_auction(db_session)
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/auctions/{session_id}/bids",
+        headers=_subscriber_headers(client),
+        json={"membershipId": membership_id, "bidAmount": 12000, "idempotencyKey": "   "},
+    )
+
+    assert response.status_code == 422
 
 
 def test_post_bid_allows_multiple_bids_until_slot_limit(app, db_session):
@@ -624,6 +661,35 @@ def test_finalize_auction_returns_session_summary_for_owner(app, db_session):
     assert body["resultSummary"]["totalBids"] == 1
     assert body["resultSummary"]["validBidCount"] == 1
     assert body["resultSummary"]["auctionResultId"] is not None
+
+
+def test_finalize_auction_is_idempotent_after_result_exists(app, db_session):
+    session_id, membership_id, _group_id = _seed_live_auction(db_session)
+    winning_bid = AuctionBid(
+        auction_session_id=session_id,
+        membership_id=membership_id,
+        bidder_user_id=1,
+        idempotency_key="winning-bid-idempotent",
+        bid_amount=12000,
+        bid_discount_amount=0,
+        placed_at=datetime(2026, 7, 10, 10, 1, tzinfo=timezone.utc),
+        is_valid=True,
+    )
+    db_session.add(winning_bid)
+    db_session.commit()
+    client = TestClient(app)
+    headers = _owner_headers(client)
+
+    first_response = client.post(f"/api/auctions/{session_id}/finalize", headers=headers)
+    second_response = client.post(f"/api/auctions/{session_id}/finalize", headers=headers)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json()["resultSummary"]["auctionResultId"] is not None
+    assert second_response.json()["resultSummary"]["auctionResultId"] == first_response.json()["resultSummary"]["auctionResultId"]
+    body = second_response.json()
+    assert body["status"] == "finalized"
+    assert body["finalizationMessage"] == "Auction closed and finalized."
     assert body["resultSummary"]["winnerMembershipId"] == membership_id
     assert body["resultSummary"]["winnerMembershipNo"] == 1
     assert body["resultSummary"]["winnerName"] == "Owner One"
@@ -662,7 +728,7 @@ def test_finalize_auction_creates_payout_and_ledger_entry(app, db_session):
     result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
     assert result is not None
 
-    payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == result.id))
+    payout = _wait_for_payout(db_session, result.id)
     assert payout is not None
     ledger_entry = db_session.scalar(
         select(LedgerEntry).where(
@@ -725,7 +791,7 @@ def test_finalize_auction_applies_percentage_commission_to_result_and_payout(app
     assert result is not None
     assert float(result.owner_commission_amount) == 1200.0
 
-    payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == result.id))
+    payout = _wait_for_payout(db_session, result.id)
     assert payout is not None
     assert float(payout.deductions_amount) == 21460.0
     assert float(payout.net_amount) == 178540.0
@@ -757,12 +823,12 @@ def test_finalize_auction_is_idempotent_for_payout_records(app, db_session):
 
     result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
     assert result is not None
+    payout = _wait_for_payout(db_session, result.id)
+    assert payout is not None
     payout_count = db_session.scalar(
         select(func.count(Payout.id)).where(Payout.auction_result_id == result.id)
     )
     assert payout_count == 1
-    payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == result.id))
-    assert payout is not None
 
     ledger_count = db_session.scalar(
         select(func.count(LedgerEntry.id)).where(
@@ -771,6 +837,146 @@ def test_finalize_auction_is_idempotent_for_payout_records(app, db_session):
         )
     )
     assert ledger_count == 1
+
+
+def test_finalize_persists_durable_job_until_worker_processes_it(app, db_session):
+    session_id, membership_id, _group_id = _seed_live_auction(db_session)
+    winning_bid = AuctionBid(
+        auction_session_id=session_id,
+        membership_id=membership_id,
+        bidder_user_id=1,
+        idempotency_key="winning-bid-durable-job",
+        bid_amount=12000,
+        bid_discount_amount=0,
+        placed_at=datetime(2026, 7, 10, 10, 1, tzinfo=timezone.utc),
+        is_valid=True,
+    )
+    db_session.add(winning_bid)
+    db_session.commit()
+
+    auction_service_module.finalize_auction(db_session, session_id, _owner_current_user(db_session))
+
+    result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
+    assert result is not None
+
+    job = db_session.scalar(select(FinalizeJob).where(FinalizeJob.auction_id == session_id))
+    assert job is not None
+    assert job.status in {"pending", "done"}
+
+    processed: list[dict] = []
+    if job.status == "pending":
+        with database.SessionLocal() as worker_db:
+            processed = auction_service_module.process_pending_finalize_jobs(
+                worker_db,
+                auction_id=session_id,
+                limit=1,
+            )
+
+        assert len(processed) == 1
+    db_session.expire_all()
+
+    job = db_session.scalar(select(FinalizeJob).where(FinalizeJob.auction_id == session_id))
+    payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == result.id))
+    ledger_count = db_session.scalar(
+        select(func.count(LedgerEntry.id)).where(
+            LedgerEntry.source_table == "payouts",
+            LedgerEntry.source_id == payout.id if payout is not None else -1,
+        )
+    )
+
+    assert job is not None
+    assert job.status == "done"
+    assert payout is not None
+    assert ledger_count == 1
+
+
+def test_finalize_auction_concurrent_requests_remain_idempotent(app, db_session, monkeypatch):
+    session_id, membership_id, _group_id = _seed_live_auction(db_session)
+    winning_bid = AuctionBid(
+        auction_session_id=session_id,
+        membership_id=membership_id,
+        bidder_user_id=1,
+        idempotency_key="winning-bid-concurrent",
+        bid_amount=12000,
+        bid_discount_amount=0,
+        placed_at=datetime(2026, 7, 10, 10, 1, tzinfo=timezone.utc),
+        is_valid=True,
+    )
+    db_session.add(winning_bid)
+    db_session.commit()
+
+    original_selector = auction_service_module._select_live_winning_bid_snapshot
+    barrier = threading.Barrier(2)
+    responses: list[int] = []
+
+    def _synchronized_selector(db, *, session_id: int):
+        snapshot = original_selector(db, session_id=session_id)
+        barrier.wait(timeout=3)
+        time.sleep(0.05)
+        return snapshot
+
+    def _worker():
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(f"/api/auctions/{session_id}/finalize", headers=_owner_headers(client))
+        responses.append(response.status_code)
+
+    monkeypatch.setattr(auction_service_module, "_select_live_winning_bid_snapshot", _synchronized_selector)
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(responses) == [200, 200]
+    result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
+    assert result is not None
+    result_count = db_session.scalar(
+        select(func.count(AuctionResult.id)).where(AuctionResult.auction_session_id == session_id)
+    )
+    assert result_count == 1
+    payout = _wait_for_payout(db_session, result.id)
+    assert payout is not None
+    payout_count = db_session.scalar(
+        select(func.count(Payout.id)).where(Payout.auction_result_id == result.id)
+    )
+    assert payout_count == 1
+
+
+def test_finalize_auction_rolls_back_on_write_failure(app, db_session, monkeypatch):
+    session_id, membership_id, _group_id = _seed_live_auction(db_session)
+    winning_bid = AuctionBid(
+        auction_session_id=session_id,
+        membership_id=membership_id,
+        bidder_user_id=1,
+        idempotency_key="winning-bid-rollback",
+        bid_amount=12000,
+        bid_discount_amount=0,
+        placed_at=datetime(2026, 7, 10, 10, 1, tzinfo=timezone.utc),
+        is_valid=True,
+    )
+    db_session.add(winning_bid)
+    db_session.commit()
+
+    def _raise_audit_failure(*args, **kwargs):
+        raise RuntimeError("audit failed")
+
+    monkeypatch.setattr(auction_service_module, "log_audit_event", _raise_audit_failure)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.post(f"/api/auctions/{session_id}/finalize", headers=_owner_headers(client))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "finalizing"
+    db_session.expire_all()
+    session = db_session.get(AuctionSession, session_id)
+    job = db_session.scalar(select(FinalizeJob).where(FinalizeJob.auction_id == session_id))
+    assert session is not None
+    assert session.status == "finalizing"
+    assert job is not None
+    assert job.status == "pending"
+    assert "audit failed" in (job.last_error or "")
+    assert db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id)) is None
 
 
 def test_owner_console_returns_owner_scoped_session_details(app, db_session):
@@ -1159,11 +1365,48 @@ def test_finalize_fixed_mode_creates_auto_winner_result_and_payout(app, db_sessi
     assert auto_bid is not None
     assert float(auto_bid.bid_amount) == 0.0
 
-    payout = db_session.scalar(select(Payout).where(Payout.auction_result_id == result.id))
+    payout = _wait_for_payout(db_session, result.id)
     assert payout is not None
     assert float(payout.gross_amount) == 200000.0
     assert float(payout.deductions_amount) == 10000.0
     assert float(payout.net_amount) == 190000.0
+
+
+def test_finalize_fixed_mode_parallel_requests_produce_single_result(app, db_session):
+    session_id, _membership_id, _group_id = _seed_live_auction(db_session, auction_mode="FIXED")
+    responses: list[int] = []
+
+    def _worker():
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(f"/api/auctions/{session_id}/finalize", headers=_owner_headers(client))
+        responses.append(response.status_code)
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(responses) == [200, 200]
+
+    result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
+    assert result is not None
+
+    result_count = db_session.scalar(
+        select(func.count(AuctionResult.id)).where(AuctionResult.auction_session_id == session_id)
+    )
+    job_count = db_session.scalar(
+        select(func.count(FinalizeJob.id)).where(FinalizeJob.auction_id == session_id)
+    )
+    payout = _wait_for_payout(db_session, result.id)
+    payout_count = db_session.scalar(
+        select(func.count(Payout.id)).where(Payout.auction_result_id == result.id)
+    )
+
+    assert result_count == 1
+    assert job_count == 1
+    assert payout is not None
+    assert payout_count == 1
 
 
 def test_finalize_auction_rejects_non_owning_owner(app, db_session):

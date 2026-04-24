@@ -1,7 +1,13 @@
+import logging
+from time import perf_counter
+
+from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.pagination import PaginatedResponse
 from app.core.audit import log_audit_event
+from app.core.logging import APP_LOGGER_NAME
 from app.core.money import money_int
 from app.core.security import CurrentUser, require_owner
 from app.models.money import Payment
@@ -10,9 +16,12 @@ from app.modules.notifications.service import (
     notify_payment_recorded,
 )
 from app.modules.payments.installment_service import build_membership_dues_snapshot_map, reconcile_installment_payment
-from app.modules.payments.ledger_service import create_payment_ledger_entry
+from app.modules.payments.ledger_service import ensure_payment_ledger_entry
 from app.modules.payments.queries import get_member_outstanding_totals, list_payments
 from app.modules.payments.validation import validate_payment_submission
+
+
+logger = logging.getLogger(APP_LOGGER_NAME)
 
 
 def _payment_group_id(payment: Payment, context=None) -> int | None:
@@ -56,100 +65,166 @@ def _serialize_payment(
 
 
 def record_payment(db: Session, payload, current_user: CurrentUser):
-    context = validate_payment_submission(db, payload, current_user)
-    before_dues_snapshot = None
-    if context.membership is not None:
-        before_dues_snapshot = build_membership_dues_snapshot_map(
-            db,
-            [context.membership.id],
-            as_of_date=payload.paymentDate,
-        ).get(context.membership.id)
-    installment_before = None
-    if context.installment is not None:
-        installment_before = {
-            "installmentId": context.installment.id,
-            "status": context.installment.status,
-            "paidAmount": money_int(context.installment.paid_amount),
-            "balanceAmount": money_int(context.installment.balance_amount),
-            "penaltyAmount": money_int(context.installment.penalty_amount),
-        }
-
-    payment = Payment(
-        owner_id=context.owner.id,
-        subscriber_id=context.subscriber.id,
-        membership_id=context.membership.id if context.membership is not None else None,
-        installment_id=context.installment.id if context.installment is not None else None,
-        payment_type=payload.paymentType,
-        payment_method=payload.paymentMethod,
-        amount=payload.amount,
-        payment_date=payload.paymentDate,
-        reference_no=payload.referenceNo,
-        recorded_by_user_id=current_user.user.id,
-        status="recorded",
-    )
-    db.add(payment)
-    db.flush()
-
+    started_at = perf_counter()
+    payment = None
+    context = None
     updated_installment = None
-    if context.installment is not None:
-        updated_installment = reconcile_installment_payment(
-            db,
-            context.installment,
-            context.group,
-            payload.amount,
-            as_of_date=payload.paymentDate,
-            commit=False,
-        )
+    ledger_entry = None
 
-    ledger_entry = create_payment_ledger_entry(db, payment)
-    notify_payment_recorded(db, payment=payment)
-    after_dues_snapshot = None
-    if payment.membership_id is not None:
-        after_dues_snapshot = build_membership_dues_snapshot_map(
+    try:
+        context = validate_payment_submission(db, payload, current_user)
+        before_dues_snapshot = None
+        if context.membership is not None:
+            before_dues_snapshot = build_membership_dues_snapshot_map(
+                db,
+                [context.membership.id],
+                as_of_date=payload.paymentDate,
+            ).get(context.membership.id)
+        installment_before = None
+        if context.installment is not None:
+            installment_before = {
+                "installmentId": context.installment.id,
+                "status": context.installment.status,
+                "paidAmount": money_int(context.installment.paid_amount),
+                "balanceAmount": money_int(context.installment.balance_amount),
+                "penaltyAmount": money_int(context.installment.penalty_amount),
+            }
+
+        payment = Payment(
+            owner_id=context.owner.id,
+            subscriber_id=context.subscriber.id,
+            membership_id=context.membership.id if context.membership is not None else None,
+            installment_id=context.installment.id if context.installment is not None else None,
+            payment_type=payload.paymentType,
+            payment_method=payload.paymentMethod,
+            amount=payload.amount,
+            payment_date=payload.paymentDate,
+            reference_no=payload.referenceNo,
+            recorded_by_user_id=current_user.user.id,
+            status="recorded",
+        )
+        db.add(payment)
+        db.flush()
+
+        if context.installment is not None:
+            updated_installment = reconcile_installment_payment(
+                db,
+                context.installment,
+                context.group,
+                payload.amount,
+                as_of_date=payload.paymentDate,
+                commit=False,
+            )
+
+        ledger_entry = ensure_payment_ledger_entry(db, payment)
+        notify_payment_recorded(db, payment=payment)
+        after_dues_snapshot = None
+        if payment.membership_id is not None:
+            after_dues_snapshot = build_membership_dues_snapshot_map(
+                db,
+                [payment.membership_id],
+                as_of_date=payment.payment_date,
+            ).get(payment.membership_id)
+        log_audit_event(
             db,
-            [payment.membership_id],
-            as_of_date=payment.payment_date,
-        ).get(payment.membership_id)
-    log_audit_event(
-        db,
-        action="payment.recorded",
-        entity_type="payment",
-        entity_id=payment.id,
-        current_user=current_user,
-        owner_id=context.owner.id,
-        metadata={
-            "amount": money_int(payment.amount),
-            "groupId": _payment_group_id(payment, context),
-            "paymentMethod": payment.payment_method,
-            "paymentType": payment.payment_type,
-            "subscriberId": payment.subscriber_id,
-        },
-        before={
-            "installment": installment_before,
-            "dues": before_dues_snapshot.as_dict() if before_dues_snapshot is not None else None,
-        },
-        after={
-            "paymentId": payment.id,
-            "installment": (
-                {
-                    "installmentId": updated_installment.id,
-                    "status": updated_installment.status,
-                    "paidAmount": money_int(updated_installment.paid_amount),
-                    "balanceAmount": money_int(updated_installment.balance_amount),
-                    "penaltyAmount": money_int(updated_installment.penalty_amount),
-                }
-                if updated_installment is not None
-                else None
-            ),
-            "dues": after_dues_snapshot.as_dict() if after_dues_snapshot is not None else None,
-        },
-    )
-    db.commit()
+            action="payment.recorded",
+            entity_type="payment",
+            entity_id=payment.id,
+            current_user=current_user,
+            owner_id=context.owner.id,
+            metadata={
+                "amount": money_int(payment.amount),
+                "groupId": _payment_group_id(payment, context),
+                "paymentMethod": payment.payment_method,
+                "paymentType": payment.payment_type,
+                "subscriberId": payment.subscriber_id,
+            },
+            before={
+                "installment": installment_before,
+                "dues": before_dues_snapshot.as_dict() if before_dues_snapshot is not None else None,
+            },
+            after={
+                "paymentId": payment.id,
+                "installment": (
+                    {
+                        "installmentId": updated_installment.id,
+                        "status": updated_installment.status,
+                        "paidAmount": money_int(updated_installment.paid_amount),
+                        "balanceAmount": money_int(updated_installment.balance_amount),
+                        "penaltyAmount": money_int(updated_installment.penalty_amount),
+                    }
+                    if updated_installment is not None
+                    else None
+                ),
+                "dues": after_dues_snapshot.as_dict() if after_dues_snapshot is not None else None,
+            },
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "ux_payments_request_dedupe" in str(exc).lower():
+            logger.warning(
+                "Duplicate payment submission rejected",
+                extra={
+                    "event": "payment.record.duplicate",
+                    "owner_id": getattr(getattr(context, "owner", None), "id", None),
+                    "subscriber_id": getattr(getattr(context, "subscriber", None), "id", None),
+                    "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Duplicate payment submission",
+            ) from exc
+        logger.exception(
+            "Payment recording failed due to integrity error",
+            extra={
+                "event": "payment.record.failed",
+                "owner_id": getattr(getattr(context, "owner", None), "id", None),
+                "subscriber_id": getattr(getattr(context, "subscriber", None), "id", None),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
+        raise
+    except HTTPException:
+        db.rollback()
+        logger.warning(
+            "Payment validation rejected",
+            extra={
+                "event": "payment.record.rejected",
+                "owner_id": getattr(getattr(context, "owner", None), "id", None),
+                "subscriber_id": getattr(getattr(context, "subscriber", None), "id", None),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Payment recording failed",
+            extra={
+                "event": "payment.record.failed",
+                "owner_id": getattr(getattr(context, "owner", None), "id", None),
+                "subscriber_id": getattr(getattr(context, "subscriber", None), "id", None),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
+        raise
+
     db.refresh(payment)
     if updated_installment is not None:
         db.refresh(updated_installment)
     db.refresh(ledger_entry)
-    dispatch_staged_notifications(db)
+    try:
+        dispatch_staged_notifications(db)
+    except Exception:
+        logger.exception(
+            "Payment notification dispatch failed after commit",
+            extra={
+                "event": "payment.record.notification_dispatch_failed",
+                "payment_id": payment.id,
+            },
+        )
     dues_snapshot = None
     if payment.membership_id is not None:
         dues_snapshot = build_membership_dues_snapshot_map(
@@ -157,6 +232,18 @@ def record_payment(db: Session, payload, current_user: CurrentUser):
             [payment.membership_id],
             as_of_date=payment.payment_date,
         ).get(payment.membership_id)
+
+    logger.info(
+        "Payment recorded",
+        extra={
+            "event": "payment.record.completed",
+            "payment_id": payment.id,
+            "owner_id": context.owner.id,
+            "subscriber_id": payment.subscriber_id,
+            "amount": money_int(payment.amount),
+            "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+        },
+    )
 
     return _serialize_payment(
         payment,

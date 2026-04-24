@@ -20,6 +20,7 @@ class ChitGroup(Base):
     member_count: Mapped[int] = mapped_column(Integer)
     cycle_count: Mapped[int] = mapped_column(Integer)
     cycle_frequency: Mapped[str] = mapped_column(String(30))
+    visibility: Mapped[str] = mapped_column(String(20), default="private")
     start_date: Mapped[date] = mapped_column(Date)
     first_auction_date: Mapped[date] = mapped_column(Date)
     current_cycle_no: Mapped[int] = mapped_column(Integer, default=1)

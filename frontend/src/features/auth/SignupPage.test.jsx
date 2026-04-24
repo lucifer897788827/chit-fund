@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import SignupPage from "./SignupPage";
 import { signupUser } from "./api";
-import { saveSession } from "../../lib/auth/store";
+import { getDashboardPath, saveSession } from "../../lib/auth/store";
 
 const mockNavigate = jest.fn();
 
@@ -14,6 +14,7 @@ jest.mock("./api", () => ({
 
 jest.mock("../../lib/auth/store", () => ({
   saveSession: jest.fn(),
+  getDashboardPath: jest.fn(),
 }));
 
 jest.mock("react-router-dom", () => ({
@@ -23,6 +24,7 @@ jest.mock("react-router-dom", () => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  getDashboardPath.mockImplementation(() => "/subscriber-dashboard");
 });
 
 test("creates a subscriber account, saves the session, and routes to the subscriber dashboard", async () => {
@@ -67,5 +69,5 @@ test("creates a subscriber account, saves the session, and routes to the subscri
       subscriber_id: 12,
     }),
   );
-  expect(mockNavigate).toHaveBeenCalledWith("/subscriber");
+  expect(mockNavigate).toHaveBeenCalledWith("/subscriber-dashboard");
 });

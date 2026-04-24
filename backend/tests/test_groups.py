@@ -76,6 +76,7 @@ def test_create_group_returns_owner_scoped_group(app, db_session):
     group = db_session.scalar(select(ChitGroup).where(ChitGroup.group_code == "MAY-001"))
     assert group is not None
     assert group.title == "May Monthly Chit"
+    assert group.visibility == "private"
     assert group.penalty_enabled is False
     assert group.penalty_type is None
     assert group.penalty_value is None
@@ -119,6 +120,100 @@ def test_create_group_persists_penalty_configuration(app, db_session):
     assert group.penalty_type == "PERCENTAGE"
     assert float(group.penalty_value) == 7.5
     assert group.grace_period_days == 3
+
+
+def test_create_group_accepts_public_visibility(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "PUB-001",
+            "title": "Public Group",
+            "chitValue": 500000,
+            "installmentAmount": 25000,
+            "memberCount": 20,
+            "cycleCount": 20,
+            "cycleFrequency": "monthly",
+            "visibility": "public",
+            "startDate": "2026-05-01",
+            "firstAuctionDate": "2026-05-10",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["visibility"] == "public"
+    assert response.json()["status"] == "active"
+    group = db_session.scalar(select(ChitGroup).where(ChitGroup.group_code == "PUB-001"))
+    assert group is not None
+    assert group.visibility == "public"
+    assert group.status == "active"
+
+
+def test_public_chits_endpoint_returns_only_public_active_groups(app, db_session):
+    owner = db_session.scalar(select(Owner).where(Owner.id == 1))
+    assert owner is not None
+    db_session.add_all(
+        [
+            ChitGroup(
+                owner_id=owner.id,
+                group_code="PUBLIC-OPEN",
+                title="Public Open Group",
+                chit_value=300000,
+                installment_amount=15000,
+                member_count=10,
+                cycle_count=10,
+                cycle_frequency="monthly",
+                visibility="public",
+                start_date=date(2026, 6, 1),
+                first_auction_date=date(2026, 6, 10),
+                current_cycle_no=1,
+                bidding_enabled=True,
+                status="active",
+            ),
+            ChitGroup(
+                owner_id=owner.id,
+                group_code="PRIVATE-HIDDEN",
+                title="Private Hidden Group",
+                chit_value=300000,
+                installment_amount=15000,
+                member_count=10,
+                cycle_count=10,
+                cycle_frequency="monthly",
+                visibility="private",
+                start_date=date(2026, 6, 1),
+                first_auction_date=date(2026, 6, 10),
+                current_cycle_no=1,
+                bidding_enabled=True,
+                status="active",
+            ),
+            ChitGroup(
+                owner_id=owner.id,
+                group_code="PUBLIC-DRAFT",
+                title="Public Draft Group",
+                chit_value=300000,
+                installment_amount=15000,
+                member_count=10,
+                cycle_count=10,
+                cycle_frequency="monthly",
+                visibility="public",
+                start_date=date(2026, 6, 1),
+                first_auction_date=date(2026, 6, 10),
+                current_cycle_no=1,
+                bidding_enabled=True,
+                status="draft",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    client = TestClient(app)
+    response = client.get("/api/chits/public")
+
+    assert response.status_code == 200
+    assert [group["groupCode"] for group in response.json()] == ["PUBLIC-OPEN"]
 
 
 def test_create_group_allows_zero_percentage_penalty(app):

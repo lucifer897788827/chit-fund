@@ -5,7 +5,7 @@ import { BellRing, CheckCheck, Clock3, Inbox, Loader2 } from "lucide-react";
 import { PageErrorState, PageLoadingState } from "../../components/page-state";
 import { useSignedInShellHeader } from "../../components/signed-in-shell";
 import { getApiErrorMessage } from "../../lib/api-error";
-import { getCurrentUser } from "../../lib/auth/store";
+import { getCurrentUser, getDashboardPath, sessionHasRole } from "../../lib/auth/store";
 import { logoutUser } from "../auth/api";
 import { fetchNotifications, markNotificationRead } from "./api";
 
@@ -409,7 +409,7 @@ export default function NotificationsPage() {
 
   const totalCount = notifications.length;
   const readCount = totalCount - unreadCount;
-  const dashboardPath = currentUser?.role === "chit_owner" ? "/owner" : "/subscriber";
+  const dashboardPath = getDashboardPath(currentUser);
   const shellContextLabel =
     unreadCount > 0
       ? `${unreadCount} unread ${unreadCount === 1 ? "notification" : "notifications"}`
@@ -545,8 +545,8 @@ export default function NotificationsPage() {
                   marking={markingNotificationId === notification.id}
                   notification={notification}
                   onMarkRead={handleMarkRead}
-                  role={currentUser?.role}
-                />
+              role={sessionHasRole(currentUser, "subscriber") ? "subscriber" : "owner"}
+            />
               ))}
             </div>
           )}

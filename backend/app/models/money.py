@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -81,3 +81,25 @@ class LedgerEntry(Base):
     credit_amount: Mapped[int] = mapped_column(Integer)
     description: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+Index(
+    "ux_payments_request_dedupe",
+    Payment.owner_id,
+    Payment.subscriber_id,
+    func.coalesce(Payment.membership_id, -1),
+    func.coalesce(Payment.installment_id, -1),
+    Payment.payment_type,
+    Payment.payment_method,
+    Payment.amount,
+    Payment.payment_date,
+    func.coalesce(Payment.reference_no, "__null__"),
+    unique=True,
+)
+
+Index(
+    "ux_ledger_entries_source",
+    LedgerEntry.source_table,
+    LedgerEntry.source_id,
+    unique=True,
+)

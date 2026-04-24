@@ -1,29 +1,26 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { Bell, CreditCard, Gavel, Home, UserRound } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
-import { getCurrentUser } from "../lib/auth/store";
+import { fetchCurrentUser } from "../features/auth/api";
+import { getCurrentUser, getDashboardPath, getUserRoles, updateSession } from "../lib/auth/store";
 
 const SignedInShellContext = createContext(null);
 
-function formatRoleLabel(role) {
-  if (role === "chit_owner") {
+function formatRoleLabel(roles) {
+  if (roles.includes("admin")) {
+    return "Admin";
+  }
+  if (roles.includes("owner") && roles.includes("subscriber")) {
+    return "Owner and subscriber";
+  }
+  if (roles.includes("owner")) {
     return "Chit owner";
   }
-  if (role === "subscriber") {
+  if (roles.includes("subscriber")) {
     return "Subscriber";
   }
   return "Signed in";
-}
-
-function getDashboardPath(currentUser) {
-  if (currentUser?.role === "chit_owner" || currentUser?.owner_id || currentUser?.ownerId) {
-    return "/owner";
-  }
-  if (currentUser?.role === "subscriber" || currentUser?.subscriber_id || currentUser?.subscriberId) {
-    return "/subscriber";
-  }
-  return "/";
 }
 
 function getDefaultPageMeta(pathname) {
@@ -45,16 +42,22 @@ function getDefaultPageMeta(pathname) {
       contextLabel: "Private off-platform records",
     };
   }
-  if (pathname === "/owner") {
+  if (pathname === "/owner" || pathname === "/owner-dashboard") {
     return {
       title: "Owner dashboard",
       contextLabel: "Groups, auctions, and collections",
     };
   }
-  if (pathname === "/subscriber") {
+  if (pathname === "/subscriber" || pathname === "/subscriber-dashboard") {
     return {
       title: "Subscriber dashboard",
       contextLabel: "Memberships, dues, and bidding access",
+    };
+  }
+  if (pathname === "/admin-dashboard") {
+    return {
+      title: "Admin dashboard",
+      contextLabel: "Owner approvals and platform oversight",
     };
   }
   return {
@@ -65,7 +68,13 @@ function getDefaultPageMeta(pathname) {
 
 function isNavItemActive(itemKey, pathname, hash) {
   if (itemKey === "home") {
-    return (pathname === "/owner" || pathname === "/subscriber") && !hash;
+    return (
+      pathname === "/owner" ||
+      pathname === "/owner-dashboard" ||
+      pathname === "/subscriber" ||
+      pathname === "/subscriber-dashboard" ||
+      pathname === "/admin-dashboard"
+    ) && !hash;
   }
   if (itemKey === "auctions") {
     return pathname.startsWith("/auctions/") || hash === "#auctions";
@@ -80,6 +89,30 @@ function isNavItemActive(itemKey, pathname, hash) {
     return hash === "#profile";
   }
   return false;
+}
+
+function isRoleHomePath(pathname) {
+  return [
+    "/owner",
+    "/owner-dashboard",
+    "/subscriber",
+    "/subscriber-dashboard",
+    "/admin-dashboard",
+    "/admin/owner-requests",
+  ].includes(pathname);
+}
+
+function normalizeRoleHomePath(pathname) {
+  if (pathname === "/owner" || pathname === "/owner-dashboard") {
+    return "/owner";
+  }
+  if (pathname === "/subscriber" || pathname === "/subscriber-dashboard") {
+    return "/subscriber";
+  }
+  if (pathname === "/admin-dashboard" || pathname === "/admin/owner-requests") {
+    return "/admin";
+  }
+  return pathname;
 }
 
 export function useSignedInShellHeader({ title, contextLabel }) {
@@ -102,15 +135,57 @@ export function useSignedInShellHeader({ title, contextLabel }) {
 }
 
 export default function SignedInAppShell({ children }) {
-  const currentUser = getCurrentUser();
+  const navigate = useNavigate();
   const location = useLocation();
+  const [currentUser, setCurrentUser] = useState(() => getCurrentUser());
   const [pageMeta, setPageMeta] = useState(null);
   const dashboardPath = getDashboardPath(currentUser);
-  const roleLabel = formatRoleLabel(currentUser?.role);
+  const roleLabel = formatRoleLabel(getUserRoles(currentUser));
 
   useEffect(() => {
     setPageMeta(null);
   }, [location.pathname]);
+
+  useEffect(() => {
+    let active = true;
+    const storedSession = getCurrentUser();
+    setCurrentUser(storedSession);
+
+    if (!storedSession?.access_token) {
+      return () => {
+        active = false;
+      };
+    }
+
+    fetchCurrentUser()
+      .then((authState) => {
+        if (!active) {
+          return;
+        }
+
+        const nextSession = updateSession(authState);
+        setCurrentUser(nextSession);
+
+        if (!isRoleHomePath(location.pathname)) {
+          return;
+        }
+
+        const currentHomePath = normalizeRoleHomePath(location.pathname);
+        const nextHomePath = normalizeRoleHomePath(getDashboardPath(nextSession));
+        if (currentHomePath !== nextHomePath) {
+          navigate(getDashboardPath(nextSession), { replace: true });
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setCurrentUser(getCurrentUser());
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [location.pathname, navigate]);
 
   const headerMeta = {
     ...getDefaultPageMeta(location.pathname),

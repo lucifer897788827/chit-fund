@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 jest.mock("../../lib/auth/store", () => ({
+  getDashboardPath: jest.fn(() => "/subscriber"),
   getCurrentUser: jest.fn(),
+  sessionHasRole: jest.fn((session, role) => {
+    if (role === "subscriber") {
+      return Boolean(session?.role === "subscriber" || session?.subscriber_id);
+    }
+    return false;
+  }),
 }));
 
 jest.mock("../auth/api", () => ({
@@ -17,10 +24,17 @@ jest.mock("./api", () => ({
 
 import NotificationsPage from "./NotificationsPage";
 import { fetchNotifications, markNotificationRead } from "./api";
-import { getCurrentUser } from "../../lib/auth/store";
+import { getCurrentUser, getDashboardPath, sessionHasRole } from "../../lib/auth/store";
 
 beforeEach(() => {
   jest.clearAllMocks();
+  getDashboardPath.mockReturnValue("/subscriber");
+  sessionHasRole.mockImplementation((session, role) => {
+    if (role === "subscriber") {
+      return Boolean(session?.role === "subscriber" || session?.subscriber_id);
+    }
+    return false;
+  });
 });
 
 function renderPage() {

@@ -14,10 +14,30 @@ afterEach(() => {
 });
 
 jest.mock("./features/auctions/api", () => ({
+  acceptGroupInvite: jest.fn(),
+  approveGroupMembershipRequest: jest.fn(),
+  createGroup: jest.fn(),
   createAuctionSession: jest.fn(),
   fetchAuctionRoom: jest.fn(),
   fetchGroups: jest.fn(),
+  fetchOwnerMembershipRequests: jest.fn(() => Promise.resolve([])),
+  fetchPublicChits: jest.fn(() => Promise.resolve([])),
+  inviteSubscriberToGroup: jest.fn(),
+  rejectGroupInvite: jest.fn(),
+  rejectGroupMembershipRequest: jest.fn(),
+  requestGroupMembership: jest.fn(),
+  searchChitsByCode: jest.fn(() => Promise.resolve([])),
   submitBid: jest.fn(),
+}));
+
+jest.mock("./features/auth/api", () => ({
+  confirmPasswordReset: jest.fn(),
+  fetchCurrentUser: jest.fn(() => Promise.resolve({})),
+  loginUser: jest.fn(),
+  logoutUser: jest.fn(() => Promise.resolve()),
+  refreshSession: jest.fn(),
+  requestPasswordReset: jest.fn(),
+  signupUser: jest.fn(),
 }));
 
 jest.mock("./features/auctions/AuctionRoomPage", () => {
@@ -51,10 +71,40 @@ jest.mock("./features/notifications/api", () => ({
   markNotificationRead: jest.fn(),
 }));
 
+jest.mock("./features/dashboard/api", () => ({
+  fetchOwnerAuditLogs: jest.fn(() => Promise.resolve([])),
+  fetchOwnerDashboard: jest.fn(() =>
+    Promise.resolve({
+      ownerId: 4,
+      groupCount: 0,
+      auctionCount: 0,
+      paymentCount: 0,
+      totalDueAmount: 0,
+      totalPaidAmount: 0,
+      totalOutstandingAmount: 0,
+      groups: [],
+      recentAuctions: [],
+      recentPayments: [],
+      balances: [],
+      recentActivity: [],
+      recentAuditLogs: [],
+    }),
+  ),
+  fetchSubscriberDashboard: jest.fn(() =>
+    Promise.resolve({
+      memberships: [],
+      activeAuctions: [],
+      recentAuctionOutcomes: [],
+    }),
+  ),
+}));
+
 jest.mock("./features/payments/api", () => ({
   fetchPaymentBalances: jest.fn(() => Promise.resolve([])),
   fetchPayments: jest.fn(() => Promise.resolve([])),
+  fetchOwnerPayouts: jest.fn(() => Promise.resolve([])),
   recordPayment: jest.fn(),
+  settleOwnerPayout: jest.fn(),
 }));
 
 jest.mock("./features/subscribers/api", () => ({
@@ -68,10 +118,12 @@ beforeEach(() => {
   const { fetchPaymentBalances, fetchPayments } = require("./features/payments/api");
   const { fetchSubscribers } = require("./features/subscribers/api");
   const { fetchNotifications } = require("./features/notifications/api");
+  const { fetchCurrentUser } = require("./features/auth/api");
   fetchPaymentBalances.mockResolvedValue([]);
   fetchPayments.mockResolvedValue([]);
   fetchSubscribers.mockResolvedValue([]);
   fetchNotifications.mockResolvedValue([]);
+  fetchCurrentUser.mockResolvedValue({});
 });
 
 test("renders login route shell", () => {

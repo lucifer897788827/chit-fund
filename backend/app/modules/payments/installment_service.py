@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.money import money_int
 from app.core.time import utcnow
 from app.models.chit import ChitGroup, Installment
+from app.models.money import Payment
 from app.modules.payments.auction_payout_engine import MembershipPayableBreakdown
 
 
@@ -389,6 +390,64 @@ def reconcile_installment_payment(
 
     installment.last_paid_at = utcnow()
     installment.updated_at = installment.last_paid_at
+
+    db.add(installment)
+    if commit:
+        db.commit()
+        db.refresh(installment)
+    else:
+        db.flush()
+    return installment
+
+
+def rebuild_installment_from_payments(
+    db: Session,
+    installment: Installment,
+    group: ChitGroup | None,
+    *,
+    commit: bool = True,
+) -> Installment:
+    payments = db.scalars(
+        select(Payment)
+        .where(
+            Payment.installment_id == installment.id,
+            Payment.status == "recorded",
+        )
+        .order_by(Payment.payment_date.asc(), Payment.id.asc())
+    ).all()
+    effective_as_of_date = max((payment.payment_date for payment in payments), default=utcnow().date())
+    financial_snapshot = build_installment_financial_snapshot(
+        installment,
+        group,
+        as_of_date=effective_as_of_date,
+    )
+    total_paid_amount = sum(money_int(payment.amount) for payment in payments)
+    new_penalty_amount = financial_snapshot.penalty_amount
+    new_paid_amount = min(total_paid_amount, financial_snapshot.total_due_amount)
+    new_balance_amount = max(financial_snapshot.total_due_amount - new_paid_amount, 0)
+    if new_balance_amount <= 0:
+        new_status = "paid"
+    elif new_paid_amount > 0:
+        new_status = "partial"
+    else:
+        new_status = "pending"
+    new_last_paid_at = installment.last_paid_at or (utcnow() if payments else None)
+
+    if (
+        money_int(installment.penalty_amount) == new_penalty_amount
+        and money_int(installment.paid_amount) == new_paid_amount
+        and money_int(installment.balance_amount) == new_balance_amount
+        and installment.status == new_status
+        and installment.last_paid_at == new_last_paid_at
+    ):
+        return installment
+
+    installment.penalty_amount = new_penalty_amount
+    installment.paid_amount = new_paid_amount
+    installment.balance_amount = new_balance_amount
+    installment.status = new_status
+    installment.last_paid_at = new_last_paid_at
+    installment.updated_at = utcnow()
 
     db.add(installment)
     if commit:

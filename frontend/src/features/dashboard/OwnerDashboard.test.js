@@ -17,7 +17,12 @@ jest.mock("../payments/api", () => ({
 }));
 
 jest.mock("../auctions/api", () => ({
+  approveGroupMembershipRequest: jest.fn(),
+  createGroup: jest.fn(),
   createAuctionSession: jest.fn(),
+  fetchOwnerMembershipRequests: jest.fn(),
+  inviteSubscriberToGroup: jest.fn(),
+  rejectGroupMembershipRequest: jest.fn(),
 }));
 
 jest.mock("../auth/api", () => ({
@@ -28,7 +33,14 @@ import OwnerDashboard from "./OwnerDashboard";
 import { fetchOwnerDashboard } from "./api";
 import { getCurrentUser } from "../../lib/auth/store";
 import { fetchOwnerPayouts } from "../payments/api";
-import { createAuctionSession } from "../auctions/api";
+import {
+  approveGroupMembershipRequest,
+  createAuctionSession,
+  createGroup,
+  fetchOwnerMembershipRequests,
+  inviteSubscriberToGroup,
+  rejectGroupMembershipRequest,
+} from "../auctions/api";
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -181,6 +193,7 @@ test("renders the owner dashboard from the reporting summary payload", async () 
       status: "pending",
     },
   ]);
+  fetchOwnerMembershipRequests.mockResolvedValue([]);
 
   render(
     <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
@@ -192,6 +205,7 @@ test("renders the owner dashboard from the reporting summary payload", async () 
   expect(await screen.findByText("2 groups")).toBeInTheDocument();
   expect(fetchOwnerDashboard).toHaveBeenCalledTimes(1);
   expect(fetchOwnerPayouts).toHaveBeenCalledTimes(1);
+  expect(fetchOwnerMembershipRequests).toHaveBeenCalledTimes(1);
   expect(screen.getByText("3 auctions")).toBeInTheDocument();
   expect(screen.getByText("4 payments")).toBeInTheDocument();
   expect(screen.getByText("Rs. 1,26,000")).toBeInTheDocument();
@@ -229,6 +243,7 @@ test("renders the owner dashboard from the reporting summary payload", async () 
 
 test("shows a sign-in message when there is no owner session", () => {
   getCurrentUser.mockReturnValue(null);
+  fetchOwnerMembershipRequests.mockResolvedValue([]);
 
   render(
     <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
@@ -239,6 +254,7 @@ test("shows a sign-in message when there is no owner session", () => {
   expect(screen.getByText(/Sign in as a chit owner/i)).toBeInTheDocument();
   expect(fetchOwnerDashboard).not.toHaveBeenCalled();
   expect(fetchOwnerPayouts).not.toHaveBeenCalled();
+  expect(fetchOwnerMembershipRequests).not.toHaveBeenCalled();
 });
 
 test("creates an auction session with commission config from the dashboard form", async () => {
@@ -330,6 +346,7 @@ test("creates an auction session with commission config from the dashboard form"
       recentAuditLogs: [],
     });
   fetchOwnerPayouts.mockResolvedValue([]);
+  fetchOwnerMembershipRequests.mockResolvedValue([]);
   createAuctionSession.mockResolvedValue({
     id: 91,
     groupId: 11,
@@ -394,6 +411,81 @@ test("creates an auction session with commission config from the dashboard form"
   ).toBeGreaterThan(0);
 });
 
+test("creates a chit group with public visibility from the dashboard form", async () => {
+  const user = userEvent.setup();
+
+  getCurrentUser.mockReturnValue({
+    ownerId: 4,
+  });
+  fetchOwnerDashboard.mockResolvedValue({
+    ownerId: 4,
+    groupCount: 0,
+    auctionCount: 0,
+    paymentCount: 0,
+    totalDueAmount: 0,
+    totalPaidAmount: 0,
+    totalOutstandingAmount: 0,
+    groups: [],
+    recentAuctions: [],
+    recentPayments: [],
+    balances: [],
+    recentActivity: [],
+    recentAuditLogs: [],
+  });
+  fetchOwnerPayouts.mockResolvedValue([]);
+  fetchOwnerMembershipRequests.mockResolvedValue([]);
+  createGroup.mockResolvedValue({
+    id: 12,
+    ownerId: 4,
+    groupCode: "PUB-001",
+    title: "Public Group",
+    chitValue: 500000,
+    installmentAmount: 25000,
+    memberCount: 20,
+    cycleCount: 20,
+    cycleFrequency: "monthly",
+    visibility: "public",
+    startDate: "2026-05-01",
+    firstAuctionDate: "2026-05-10",
+    currentCycleNo: 1,
+    status: "draft",
+  });
+
+  render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <OwnerDashboard />
+    </MemoryRouter>,
+  );
+
+  await screen.findByRole("heading", { name: /Create Chit Group/i });
+  await user.type(screen.getByLabelText(/Group code/i), "PUB-001");
+  await user.type(screen.getByLabelText(/^Title$/i), "Public Group");
+  await user.type(screen.getByLabelText(/Chit value/i), "500000");
+  await user.type(screen.getByLabelText(/Installment amount/i), "25000");
+  await user.type(screen.getByLabelText(/Member count/i), "20");
+  await user.type(screen.getByLabelText(/Cycle count/i), "20");
+  await user.selectOptions(screen.getByLabelText(/Visibility/i), "public");
+  await user.type(screen.getByLabelText(/^Start date$/i), "2026-05-01");
+  await user.type(screen.getByLabelText(/First auction date/i), "2026-05-10");
+  await user.click(screen.getByRole("button", { name: /Create chit/i }));
+
+  await waitFor(() => {
+    expect(createGroup).toHaveBeenCalledWith({
+      ownerId: 4,
+      groupCode: "PUB-001",
+      title: "Public Group",
+      chitValue: 500000,
+      installmentAmount: 25000,
+      memberCount: 20,
+      cycleCount: 20,
+      cycleFrequency: "monthly",
+      visibility: "public",
+      startDate: "2026-05-01",
+      firstAuctionDate: "2026-05-10",
+    });
+  });
+});
+
 test("disables bid-rule inputs for fixed auction sessions", async () => {
   const user = userEvent.setup();
 
@@ -432,6 +524,7 @@ test("disables bid-rule inputs for fixed auction sessions", async () => {
     recentAuditLogs: [],
   });
   fetchOwnerPayouts.mockResolvedValue([]);
+  fetchOwnerMembershipRequests.mockResolvedValue([]);
 
   render(
     <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
@@ -445,4 +538,209 @@ test("disables bid-rule inputs for fixed auction sessions", async () => {
   expect(screen.getByLabelText(/Minimum Bid/i)).toBeDisabled();
   expect(screen.getByLabelText(/Maximum Bid/i)).toBeDisabled();
   expect(screen.getByLabelText(/Minimum Increment/i)).toBeDisabled();
+});
+
+test("lets an owner approve and reject pending membership requests", async () => {
+  const user = userEvent.setup();
+
+  getCurrentUser.mockReturnValue({
+    ownerId: 4,
+  });
+  fetchOwnerDashboard
+    .mockResolvedValueOnce({
+      ownerId: 4,
+      groupCount: 1,
+      auctionCount: 0,
+      paymentCount: 0,
+      totalDueAmount: 0,
+      totalPaidAmount: 0,
+      totalOutstandingAmount: 0,
+      groups: [
+        {
+          groupId: 11,
+          groupCode: "JUL-001",
+          title: "July Chit",
+          status: "active",
+          currentCycleNo: 3,
+          memberCount: 12,
+          activeMemberCount: 10,
+          totalDue: 0,
+          totalPaid: 0,
+          outstandingAmount: 0,
+          auctionCount: 0,
+          openAuctionCount: 0,
+          latestPaymentAt: null,
+        },
+      ],
+      recentAuctions: [],
+      recentPayments: [],
+      balances: [],
+      recentActivity: [],
+      recentAuditLogs: [],
+    })
+    .mockResolvedValue({
+      ownerId: 4,
+      groupCount: 1,
+      auctionCount: 0,
+      paymentCount: 0,
+      totalDueAmount: 0,
+      totalPaidAmount: 0,
+      totalOutstandingAmount: 0,
+      groups: [
+        {
+          groupId: 11,
+          groupCode: "JUL-001",
+          title: "July Chit",
+          status: "active",
+          currentCycleNo: 3,
+          memberCount: 12,
+          activeMemberCount: 11,
+          totalDue: 0,
+          totalPaid: 0,
+          outstandingAmount: 0,
+          auctionCount: 0,
+          openAuctionCount: 0,
+          latestPaymentAt: null,
+        },
+      ],
+      recentAuctions: [],
+      recentPayments: [],
+      balances: [],
+      recentActivity: [],
+      recentAuditLogs: [],
+    });
+  fetchOwnerPayouts.mockResolvedValue([]);
+  fetchOwnerMembershipRequests.mockResolvedValue([
+    {
+      membershipId: 51,
+      groupId: 11,
+      groupCode: "JUL-001",
+      groupTitle: "July Chit",
+      subscriberId: 7,
+      subscriberName: "Asha Devi",
+      memberNo: 8,
+      membershipStatus: "pending",
+      requestedAt: "2026-04-23T10:00:00.000Z",
+    },
+    {
+      membershipId: 52,
+      groupId: 11,
+      groupCode: "JUL-001",
+      groupTitle: "July Chit",
+      subscriberId: 8,
+      subscriberName: "Meena Devi",
+      memberNo: 9,
+      membershipStatus: "pending",
+      requestedAt: "2026-04-23T10:05:00.000Z",
+    },
+  ]);
+  approveGroupMembershipRequest.mockResolvedValue({
+    membershipId: 51,
+    membershipStatus: "active",
+  });
+  rejectGroupMembershipRequest.mockResolvedValue({
+    membershipId: 52,
+    membershipStatus: "rejected",
+  });
+
+  render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <OwnerDashboard />
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByRole("heading", { name: /Membership requests/i })).toBeInTheDocument();
+  expect(screen.getByText("Asha Devi")).toBeInTheDocument();
+  expect(screen.getByText("Meena Devi")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: /Approve request for Asha Devi/i }));
+
+  await waitFor(() => {
+    expect(approveGroupMembershipRequest).toHaveBeenCalledWith(11, 51);
+  });
+  expect(await screen.findByText(/Approved Asha Devi for July Chit/i)).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: /Reject request for Meena Devi/i }));
+
+  await waitFor(() => {
+    expect(rejectGroupMembershipRequest).toHaveBeenCalledWith(11, 52);
+  });
+  expect(await screen.findByText(/Rejected Meena Devi for July Chit/i)).toBeInTheDocument();
+});
+
+test("lets an owner send a phone invite to a private chit group", async () => {
+  const user = userEvent.setup();
+
+  getCurrentUser.mockReturnValue({
+    ownerId: 4,
+  });
+  fetchOwnerDashboard.mockResolvedValue({
+    ownerId: 4,
+    groupCount: 2,
+    auctionCount: 0,
+    paymentCount: 0,
+    totalDueAmount: 0,
+    totalPaidAmount: 0,
+    totalOutstandingAmount: 0,
+    groups: [
+      {
+        groupId: 11,
+        groupCode: "PRI-001",
+        title: "Private Group",
+        visibility: "private",
+        status: "active",
+        currentCycleNo: 1,
+        memberCount: 12,
+        activeMemberCount: 4,
+        totalDue: 0,
+        totalPaid: 0,
+        outstandingAmount: 0,
+        auctionCount: 0,
+        openAuctionCount: 0,
+        latestPaymentAt: null,
+      },
+      {
+        groupId: 12,
+        groupCode: "PUB-001",
+        title: "Public Group",
+        visibility: "public",
+        status: "active",
+        currentCycleNo: 1,
+        memberCount: 12,
+        activeMemberCount: 4,
+        totalDue: 0,
+        totalPaid: 0,
+        outstandingAmount: 0,
+        auctionCount: 0,
+        openAuctionCount: 0,
+        latestPaymentAt: null,
+      },
+    ],
+    recentAuctions: [],
+    recentPayments: [],
+    balances: [],
+    recentActivity: [],
+    recentAuditLogs: [],
+  });
+  fetchOwnerPayouts.mockResolvedValue([]);
+  fetchOwnerMembershipRequests.mockResolvedValue([]);
+  inviteSubscriberToGroup.mockResolvedValue({
+    membershipId: 61,
+    groupId: 11,
+    memberNo: 5,
+    membershipStatus: "invited",
+  });
+
+  render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <OwnerDashboard />
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByRole("heading", { name: /Send Private Invite/i })).toBeInTheDocument();
+  await user.type(screen.getByLabelText(/Subscriber phone/i), "8888888888");
+  await user.click(screen.getByRole("button", { name: /Send invite/i }));
+
+  expect(inviteSubscriberToGroup).toHaveBeenCalledWith(11, "8888888888");
+  expect(await screen.findByText(/Invite sent for Private Group/i)).toBeInTheDocument();
 });

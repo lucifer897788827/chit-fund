@@ -159,3 +159,19 @@ def test_authenticated_write_rate_limit_uses_user_bucket(app, db_session, monkey
     second_payment = client.post("/api/payments", headers=headers, json=payload)
     assert second_payment.status_code == 429
     assert second_payment.json()["detail"] == "Rate limit exceeded"
+
+
+def test_chit_code_search_rate_limit_uses_ip_bucket(app, monkeypatch, fake_redis):
+    monkeypatch.setattr(settings, "chit_code_rate_limit_window_seconds", 60, raising=False)
+    monkeypatch.setattr(settings, "chit_code_rate_limit_requests", 1, raising=False)
+    monkeypatch.setattr(rate_limiter, "_clock", lambda: 1_000_000, raising=False)
+
+    client = TestClient(app)
+
+    first_response = client.get("/api/chits/code/UNKNOWN-001")
+    second_response = client.get("/api/chits/code/UNKNOWN-001")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert second_response.json()["detail"] == "Rate limit exceeded"
+    assert "rate_limit:ip:testclient:chits:code-search:16666" in fake_redis.values

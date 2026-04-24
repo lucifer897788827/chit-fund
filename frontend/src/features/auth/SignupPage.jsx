@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { FormActions, FormField, FormFrame } from "../../components/form-primitives";
 import { getApiErrorMessage } from "../../lib/api-error";
-import { saveSession } from "../../lib/auth/store";
+import { getDashboardPath, saveSession } from "../../lib/auth/store";
 import { signupUser } from "./api";
 
 export default function SignupPage() {
@@ -38,7 +38,7 @@ export default function SignupPage() {
       });
       saveSession(session);
       setSuccess("Your subscriber account is ready.");
-      navigate("/subscriber");
+      navigate(getDashboardPath(session));
     } catch (signupError) {
       setError(
         getApiErrorMessage(signupError, {

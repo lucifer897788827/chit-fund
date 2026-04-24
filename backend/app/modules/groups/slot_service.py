@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.chit import ChitGroup, GroupMembership, MembershipSlot
@@ -23,6 +23,66 @@ def _resolve_membership_user_id(db: Session, membership: GroupMembership) -> int
     if user_id is None:
         raise ValueError(f"Subscriber {membership.subscriber_id} does not exist for membership {membership.id}")
     return int(user_id)
+
+
+def _get_slot_count_breakdown(db: Session, *, group_id: int, user_id: int) -> tuple[int, int]:
+    total_slots, available_slots = db.execute(
+        select(
+            func.count(MembershipSlot.id),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (MembershipSlot.has_won.is_(False), 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        ).where(
+            MembershipSlot.group_id == group_id,
+            MembershipSlot.user_id == user_id,
+        )
+    ).one()
+    return int(total_slots or 0), int(available_slots or 0)
+
+
+def _apply_membership_slot_state(
+    membership: GroupMembership,
+    *,
+    total_slots: int,
+    available_slots: int,
+    prized_cycle_no: int | None = None,
+) -> MembershipSlotSummary:
+    if total_slots <= 0:
+        has_any_won = membership.prized_status == "prized"
+        available_slots = 0 if has_any_won else 1
+        can_bid = membership.membership_status == "active" and membership.can_bid and not has_any_won
+        summary = MembershipSlotSummary(
+            total_slots=1,
+            won_slots=1 if has_any_won else 0,
+            available_slots=available_slots,
+            can_bid=can_bid,
+            has_any_won=has_any_won,
+        )
+        membership.can_bid = summary.can_bid
+        membership.prized_status = "prized" if summary.has_any_won else "unprized"
+        membership.prized_cycle_no = prized_cycle_no if summary.has_any_won else None
+        return summary
+
+    won_slots = max(total_slots - available_slots, 0)
+    has_any_won = won_slots > 0
+    can_bid = membership.membership_status == "active" and available_slots > 0
+    summary = MembershipSlotSummary(
+        total_slots=total_slots,
+        won_slots=won_slots,
+        available_slots=available_slots,
+        can_bid=can_bid,
+        has_any_won=has_any_won,
+    )
+    membership.can_bid = summary.can_bid
+    membership.prized_status = "prized" if summary.has_any_won else "unprized"
+    membership.prized_cycle_no = prized_cycle_no if summary.has_any_won else None
+    return summary
 
 
 def _list_group_slot_numbers(db: Session, *, group_id: int) -> set[int]:
@@ -94,12 +154,12 @@ def create_membership_slots(
     return created_slots
 
 
-def ensure_membership_slot(db: Session, membership: GroupMembership) -> MembershipSlot:
-    user_id = _resolve_membership_user_id(db, membership)
+def ensure_membership_slot(db: Session, membership: GroupMembership, *, user_id: int | None = None) -> MembershipSlot:
+    resolved_user_id = int(user_id) if user_id is not None else _resolve_membership_user_id(db, membership)
     slot = db.scalar(
         select(MembershipSlot).where(
             MembershipSlot.group_id == membership.group_id,
-            MembershipSlot.user_id == user_id,
+            MembershipSlot.user_id == resolved_user_id,
             MembershipSlot.slot_number == membership.member_no,
         )
     )
@@ -144,40 +204,32 @@ def get_user_available_slot_count(db: Session, *, group_id: int, user_id: int) -
 
 def build_membership_slot_summary(db: Session, membership: GroupMembership) -> MembershipSlotSummary:
     user_id = _resolve_membership_user_id(db, membership)
-    total_slots = get_user_slot_count(db, group_id=membership.group_id, user_id=user_id)
-    if total_slots == 0:
-        has_any_won = membership.prized_status == "prized"
-        available_slots = 0 if has_any_won else 1
-        can_bid = membership.membership_status == "active" and membership.can_bid and not has_any_won
-        return MembershipSlotSummary(
-            total_slots=1,
-            won_slots=1 if has_any_won else 0,
-            available_slots=available_slots,
-            can_bid=can_bid,
-            has_any_won=has_any_won,
-        )
-
-    available_slots = get_user_available_slot_count(db, group_id=membership.group_id, user_id=user_id)
-    won_slots = max(total_slots - available_slots, 0)
-    can_bid = membership.membership_status == "active" and available_slots > 0 and (
-        membership.can_bid or membership.prized_status == "prized"
+    total_slots, available_slots = _get_slot_count_breakdown(
+        db,
+        group_id=membership.group_id,
+        user_id=user_id,
     )
-    has_any_won = won_slots > 0
-    return MembershipSlotSummary(
+    return _apply_membership_slot_state(
+        membership,
         total_slots=total_slots,
-        won_slots=won_slots,
         available_slots=available_slots,
-        can_bid=can_bid,
-        has_any_won=has_any_won,
+        prized_cycle_no=membership.prized_cycle_no,
     )
 
 
 def sync_membership_slot_state(db: Session, membership: GroupMembership) -> MembershipSlotSummary:
-    summary = build_membership_slot_summary(db, membership)
-    membership.can_bid = summary.can_bid
-    membership.prized_status = "prized" if summary.has_any_won else "unprized"
-    if not summary.has_any_won:
-        membership.prized_cycle_no = None
+    user_id = _resolve_membership_user_id(db, membership)
+    total_slots, available_slots = _get_slot_count_breakdown(
+        db,
+        group_id=membership.group_id,
+        user_id=user_id,
+    )
+    summary = _apply_membership_slot_state(
+        membership,
+        total_slots=total_slots,
+        available_slots=available_slots,
+        prized_cycle_no=membership.prized_cycle_no,
+    )
     db.flush()
     return summary
 
@@ -192,7 +244,6 @@ def mark_membership_slot_won(
     *,
     cycle_no: int | None = None,
 ) -> MembershipSlot:
-    ensure_membership_slot(db, membership)
     user_id = _resolve_membership_user_id(db, membership)
     slot = db.scalar(
         select(MembershipSlot)
@@ -204,19 +255,39 @@ def mark_membership_slot_won(
         .order_by(MembershipSlot.slot_number.asc(), MembershipSlot.id.asc())
     )
     if slot is None:
-        raise ValueError(
-            f"User {user_id} does not have an available slot in group {membership.group_id}"
+        ensure_membership_slot(db, membership, user_id=user_id)
+        slot = db.scalar(
+            select(MembershipSlot)
+            .where(
+                MembershipSlot.group_id == membership.group_id,
+                MembershipSlot.user_id == user_id,
+                MembershipSlot.has_won.is_(False),
+            )
+            .order_by(MembershipSlot.slot_number.asc(), MembershipSlot.id.asc())
         )
+        if slot is None:
+            raise ValueError(
+                f"User {user_id} does not have an available slot in group {membership.group_id}"
+            )
 
     slot.has_won = True
     db.flush()
-    membership.prized_cycle_no = cycle_no
-    sync_membership_slot_state(db, membership)
+    total_slots, available_slots = _get_slot_count_breakdown(
+        db,
+        group_id=membership.group_id,
+        user_id=user_id,
+    )
+    _apply_membership_slot_state(
+        membership,
+        total_slots=total_slots,
+        available_slots=available_slots,
+        prized_cycle_no=cycle_no,
+    )
+    db.flush()
     return slot
 
 
 def release_membership_won_slot(db: Session, membership: GroupMembership) -> MembershipSlot | None:
-    ensure_membership_slot(db, membership)
     user_id = _resolve_membership_user_id(db, membership)
     slot = db.scalar(
         select(MembershipSlot)
@@ -228,10 +299,32 @@ def release_membership_won_slot(db: Session, membership: GroupMembership) -> Mem
         .order_by(MembershipSlot.slot_number.desc(), MembershipSlot.id.desc())
     )
     if slot is None:
-        sync_membership_slot_state(db, membership)
+        total_slots, available_slots = _get_slot_count_breakdown(
+            db,
+            group_id=membership.group_id,
+            user_id=user_id,
+        )
+        _apply_membership_slot_state(
+            membership,
+            total_slots=total_slots,
+            available_slots=available_slots,
+            prized_cycle_no=membership.prized_cycle_no,
+        )
+        db.flush()
         return None
 
     slot.has_won = False
     db.flush()
-    sync_membership_slot_state(db, membership)
+    total_slots, available_slots = _get_slot_count_breakdown(
+        db,
+        group_id=membership.group_id,
+        user_id=user_id,
+    )
+    _apply_membership_slot_state(
+        membership,
+        total_slots=total_slots,
+        available_slots=available_slots,
+        prized_cycle_no=membership.prized_cycle_no,
+    )
+    db.flush()
     return slot

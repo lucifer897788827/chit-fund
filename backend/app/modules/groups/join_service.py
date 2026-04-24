@@ -11,9 +11,8 @@ from app.modules.groups.service import (
     _determine_first_payable_cycle_no,
     _create_membership_installments,
     _serialize_membership,
-    _sync_membership_installments_for_slot_count,
 )
-from app.modules.groups.slot_service import create_membership_slots, ensure_membership_slot, sync_membership_slot_state
+from app.modules.groups.slot_service import create_membership_slots, sync_membership_slot_state
 
 
 def _payload_value(payload: Any, key: str, default: Any = None) -> Any:
@@ -54,12 +53,19 @@ def join_group(db: Session, group_id: int, payload, current_user: CurrentUser):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
     if group.status != "active":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group is not active")
+    if (group.visibility or "private") != "public":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Private groups require owner approval or invite",
+        )
     existing_membership = db.scalar(
         select(GroupMembership).where(
             GroupMembership.group_id == group.id,
             GroupMembership.subscriber_id == subscriber.id,
         )
     )
+    if existing_membership is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Membership already exists")
     existing_group_slot = db.scalar(
         select(MembershipSlot.user_id).where(
             MembershipSlot.group_id == group.id,
@@ -96,21 +102,17 @@ def join_group(db: Session, group_id: int, payload, current_user: CurrentUser):
             detail=f"Member number must be between 1 and {group.member_count}",
         )
 
-    membership = existing_membership
-    created_membership = membership is None
-    if membership is None:
-        membership = GroupMembership(
-            group_id=group.id,
-            subscriber_id=subscriber.id,
-            member_no=member_no,
-            membership_status="active",
-            prized_status="unprized",
-            can_bid=True,
-        )
-        db.add(membership)
-        db.flush()
-    else:
-        ensure_membership_slot(db, membership)
+    membership = GroupMembership(
+        group_id=group.id,
+        subscriber_id=subscriber.id,
+        member_no=member_no,
+        membership_status="active",
+        prized_status="unprized",
+        can_bid=True,
+    )
+    created_membership = True
+    db.add(membership)
+    db.flush()
 
     created_slots = create_membership_slots(
         db,
@@ -121,22 +123,14 @@ def join_group(db: Session, group_id: int, payload, current_user: CurrentUser):
     if not created_slots:
         ensure_membership_slot(db, membership)
     slot_summary = sync_membership_slot_state(db, membership)
-    if created_membership:
-        first_payable_cycle_no = _determine_first_payable_cycle_no(group)
-        _create_membership_installments(
-            db,
-            group=group,
-            membership=membership,
-            slot_count=slot_summary.total_slots,
-            first_payable_cycle_no=first_payable_cycle_no,
-        )
-    elif created_slots:
-        _sync_membership_installments_for_slot_count(
-            db,
-            group=group,
-            membership=membership,
-            slot_count=slot_summary.total_slots,
-        )
+    first_payable_cycle_no = _determine_first_payable_cycle_no(group)
+    _create_membership_installments(
+        db,
+        group=group,
+        membership=membership,
+        slot_count=slot_summary.total_slots,
+        first_payable_cycle_no=first_payable_cycle_no,
+    )
 
     log_audit_event(
         db,

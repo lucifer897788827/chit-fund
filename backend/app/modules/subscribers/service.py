@@ -1,3 +1,4 @@
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -54,6 +55,11 @@ def create_subscriber(db: Session, payload, current_user: CurrentUser | None = N
 
 def get_subscriber_dashboard(db: Session, current_user: CurrentUser) -> dict:
     subscriber = require_subscriber(current_user)
+    if current_user.owner is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Subscriber-only access required",
+        )
 
     membership_rows = db.execute(
         select(GroupMembership, ChitGroup)
@@ -148,6 +154,8 @@ def get_subscriber_dashboard(db: Session, current_user: CurrentUser) -> dict:
         membership = memberships_by_group_id.get(session.group_id)
         group = groups_by_id.get(session.group_id)
         if membership is None or group is None:
+            continue
+        if membership.membership_status != "active":
             continue
         slot_summary = sync_membership_slot_state(db, membership)
         active_auctions.append(

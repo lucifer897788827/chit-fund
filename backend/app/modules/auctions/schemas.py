@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class AuctionRoomResult(BaseModel):
@@ -47,7 +47,15 @@ class AuctionRoomResponse(BaseModel):
 class BidCreate(BaseModel):
     membershipId: int
     bidAmount: int
-    idempotencyKey: str
+    idempotencyKey: str = Field(min_length=1)
+
+    @field_validator("idempotencyKey")
+    @classmethod
+    def _normalize_idempotency_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("idempotencyKey must not be blank")
+        return normalized
 
 
 class BidResponse(BaseModel):

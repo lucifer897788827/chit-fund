@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     database_max_overflow: int | None = None
     database_pool_timeout_seconds: int = 30
     database_pool_recycle_seconds: int = 1800
+    database_statement_timeout_ms: int | None = None
     structured_logging: bool | None = None
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int | None = None
@@ -110,9 +111,16 @@ class Settings(BaseSettings):
     log_level: str = "info"
     rate_limit_requests: int = 60
     rate_limit_window_seconds: int = 60
+    chit_code_rate_limit_requests: int = 10
+    chit_code_rate_limit_window_seconds: int = 60
     auth_login_max_attempts: int = 5
     auth_login_attempt_window_seconds: int = 900
     auth_login_cooldown_seconds: int = 300
+    finalize_job_max_retries: int = 5
+    finalize_job_processing_timeout_seconds: int = 300
+    finalize_request_timeout_seconds: float = 15.0
+    finalize_job_time_limit_seconds: float = 60.0
+    worker_health_timeout_seconds: float = 2.0
     sms_enabled: bool = False
     sms_provider: str | None = None
 
@@ -125,6 +133,36 @@ class Settings(BaseSettings):
             return []
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator(
+        "database_pool_timeout_seconds",
+        "database_pool_recycle_seconds",
+        "database_statement_timeout_ms",
+        "redis_socket_connect_timeout_seconds",
+        "redis_socket_timeout_seconds",
+        "redis_health_check_interval_seconds",
+        "smtp_timeout_seconds",
+        "rate_limit_requests",
+        "rate_limit_window_seconds",
+        "chit_code_rate_limit_requests",
+        "chit_code_rate_limit_window_seconds",
+        "auth_login_max_attempts",
+        "auth_login_attempt_window_seconds",
+        "auth_login_cooldown_seconds",
+        "finalize_job_max_retries",
+        "finalize_job_processing_timeout_seconds",
+        "finalize_request_timeout_seconds",
+        "finalize_job_time_limit_seconds",
+        "worker_health_timeout_seconds",
+        mode="after",
+    )
+    @classmethod
+    def _validate_positive_numbers(cls, value, info):
+        if value is None:
+            return value
+        if float(value) <= 0:
+            raise ValueError(f"{info.field_name} must be greater than zero")
         return value
 
     @model_validator(mode="after")

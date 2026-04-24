@@ -50,7 +50,6 @@ def create_notification(
     )
     db.add(notification)
     db.flush()
-    db.refresh(notification)
     return notification
 
 
@@ -64,6 +63,16 @@ def stage_notification_dispatch(db: Session, notifications: list[Notification]) 
 def dispatch_staged_notifications(db: Session) -> None:
     staged = db.info.pop(_NOTIFICATION_DISPATCH_KEY, [])
     if not staged:
+        return
+
+    try:
+        from app.core.celery_app import celery_app
+    except ModuleNotFoundError:
+        return
+
+    # Keep request/response paths broker-independent in production.
+    # Pending notifications stay persisted and can be delivered by the background sweep.
+    if not bool(getattr(celery_app.conf, "task_always_eager", False)):
         return
 
     try:
@@ -88,23 +97,49 @@ def _current_owner_id(current_user: CurrentUser) -> int | None:
     return None
 
 
-def _notification_is_accessible(notification: Notification, current_user: CurrentUser) -> bool:
+def _list_subscriber_membership_owner_ids(db: Session, current_user: CurrentUser) -> set[int]:
+    if current_user.subscriber is None:
+        return set()
+
+    owner_ids = db.scalars(
+        select(ChitGroup.owner_id)
+        .join(GroupMembership, GroupMembership.group_id == ChitGroup.id)
+        .where(
+            GroupMembership.subscriber_id == current_user.subscriber.id,
+            GroupMembership.membership_status.in_(("approved", "active")),
+        )
+    ).all()
+    return {owner_id for owner_id in owner_ids}
+
+
+def _accessible_owner_ids(db: Session, current_user: CurrentUser) -> set[int]:
+    owner_ids: set[int] = set()
+
+    if current_user.owner is not None:
+        owner_ids.add(current_user.owner.id)
+    if current_user.subscriber is not None and current_user.subscriber.owner_id is not None:
+        owner_ids.add(current_user.subscriber.owner_id)
+
+    owner_ids.update(_list_subscriber_membership_owner_ids(db, current_user))
+    return owner_ids
+
+
+def _notification_is_accessible(db: Session, notification: Notification, current_user: CurrentUser) -> bool:
     if notification.user_id != current_user.user.id:
         return False
 
-    owner_id = _current_owner_id(current_user)
-    if notification.owner_id is None or owner_id is None:
+    if notification.owner_id is None:
         return notification.owner_id is None
 
-    return notification.owner_id == owner_id
+    return notification.owner_id in _accessible_owner_ids(db, current_user)
 
 
-def _notification_access_filter(current_user: CurrentUser):
-    owner_id = _current_owner_id(current_user)
-    if owner_id is None:
+def _notification_access_filter(db: Session, current_user: CurrentUser):
+    owner_ids = sorted(_accessible_owner_ids(db, current_user))
+    if not owner_ids:
         return Notification.owner_id.is_(None)
 
-    return (Notification.owner_id.is_(None)) | (Notification.owner_id == owner_id)
+    return (Notification.owner_id.is_(None)) | (Notification.owner_id.in_(owner_ids))
 
 
 def list_notifications(
@@ -118,7 +153,7 @@ def list_notifications(
         select(Notification)
         .where(
             Notification.user_id == current_user.user.id,
-            _notification_access_filter(current_user),
+            _notification_access_filter(db, current_user),
         )
         .order_by(Notification.created_at.desc(), Notification.id.desc())
     )
@@ -140,7 +175,7 @@ def mark_notification_as_read(db: Session, notification_id: int, current_user: C
     if notification.user_id != current_user.user.id:
         raise ValueError("Notification not found")
 
-    if not _notification_is_accessible(notification, current_user):
+    if not _notification_is_accessible(db, notification, current_user):
         raise PermissionError("Notification does not belong to the current owner or subscriber")
 
     notification.status = "read"
@@ -212,20 +247,32 @@ def _append_channel_notifications(
     owner_id: int | None,
     title: str,
     message: str,
+    has_email_address: bool | None = None,
 ) -> None:
-    in_app_notification = _create_notification_if_missing(
+    existing_channels = _existing_notification_channels(
         db,
         user_id=user_id,
         owner_id=owner_id,
-        channel="in_app",
         title=title,
         message=message,
     )
+
+    in_app_notification = None
+    if "in_app" not in existing_channels:
+        in_app_notification = create_notification(
+            db,
+            user_id=user_id,
+            owner_id=owner_id,
+            channel="in_app",
+            title=title,
+            message=message,
+        )
     if in_app_notification is not None:
         notifications.append(in_app_notification)
 
-    if _has_email_address(db, user_id):
-        email_notification = _create_notification_if_missing(
+    resolved_has_email_address = _has_email_address(db, user_id) if has_email_address is None else has_email_address
+    if resolved_has_email_address and "email" not in existing_channels:
+        email_notification = create_notification(
             db,
             user_id=user_id,
             owner_id=owner_id,
@@ -260,6 +307,25 @@ def _notification_exists(
     )
 
 
+def _existing_notification_channels(
+    db: Session,
+    *,
+    user_id: int,
+    owner_id: int | None,
+    title: str,
+    message: str,
+) -> set[str]:
+    rows = db.scalars(
+        select(Notification.channel).where(
+            Notification.user_id == user_id,
+            Notification.owner_id.is_(owner_id) if owner_id is None else Notification.owner_id == owner_id,
+            Notification.title == title[:255],
+            Notification.message == message[:1000],
+        )
+    ).all()
+    return {str(channel) for channel in rows}
+
+
 def _create_notification_if_missing(
     db: Session,
     *,
@@ -288,19 +354,28 @@ def _create_notification_if_missing(
     )
 
 
-def notify_auction_finalized(db: Session, *, session: AuctionSession, result: AuctionResult) -> list[Notification]:
-    group = db.scalar(select(ChitGroup).where(ChitGroup.id == session.group_id))
+def notify_auction_finalized(
+    db: Session,
+    *,
+    session: AuctionSession,
+    result: AuctionResult,
+    group: ChitGroup | None = None,
+    owner: Owner | None = None,
+    winner_membership: GroupMembership | None = None,
+    winner_subscriber: Subscriber | None = None,
+) -> list[Notification]:
+    group = group or db.scalar(select(ChitGroup).where(ChitGroup.id == session.group_id))
     if group is None:
         return []
 
-    owner = db.scalar(select(Owner).where(Owner.id == group.owner_id))
-    winner_membership = db.scalar(
+    owner = owner or db.scalar(select(Owner).where(Owner.id == group.owner_id))
+    winner_membership = winner_membership or db.scalar(
         select(GroupMembership).where(GroupMembership.id == result.winner_membership_id)
     )
     if owner is None or winner_membership is None:
         return []
 
-    winner_subscriber = db.scalar(
+    winner_subscriber = winner_subscriber or db.scalar(
         select(Subscriber).where(Subscriber.id == winner_membership.subscriber_id)
     )
     if winner_subscriber is None:
@@ -320,6 +395,7 @@ def notify_auction_finalized(db: Session, *, session: AuctionSession, result: Au
         owner_id=owner.id,
         title=title,
         message=message,
+        has_email_address=_has_email_address(db, owner.user_id),
     )
     _append_channel_notifications(
         notifications,
@@ -328,6 +404,7 @@ def notify_auction_finalized(db: Session, *, session: AuctionSession, result: Au
         owner_id=owner.id,
         title=title,
         message=message,
+        has_email_address=bool(winner_subscriber.email),
     )
 
     stage_notification_dispatch(db, notifications)
@@ -361,6 +438,7 @@ def notify_payment_recorded(db: Session, *, payment) -> list[Notification]:
         owner_id=owner.id,
         title=title,
         message=message,
+        has_email_address=_has_email_address(db, owner.user_id),
     )
     _append_channel_notifications(
         notifications,
@@ -369,15 +447,22 @@ def notify_payment_recorded(db: Session, *, payment) -> list[Notification]:
         owner_id=owner.id,
         title=title,
         message=message,
+        has_email_address=bool(subscriber.email),
     )
 
     stage_notification_dispatch(db, notifications)
     return notifications
 
 
-def notify_payout_created(db: Session, *, payout: Payout) -> list[Notification]:
-    owner = db.scalar(select(Owner).where(Owner.id == payout.owner_id))
-    subscriber = db.scalar(select(Subscriber).where(Subscriber.id == payout.subscriber_id))
+def notify_payout_created(
+    db: Session,
+    *,
+    payout: Payout,
+    owner: Owner | None = None,
+    subscriber: Subscriber | None = None,
+) -> list[Notification]:
+    owner = owner or db.scalar(select(Owner).where(Owner.id == payout.owner_id))
+    subscriber = subscriber or db.scalar(select(Subscriber).where(Subscriber.id == payout.subscriber_id))
     if owner is None or subscriber is None:
         return []
 

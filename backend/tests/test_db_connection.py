@@ -1,8 +1,6 @@
 from app.core import database
-from fastapi.testclient import TestClient
-
-from app.core import database
 from app.core.config import settings
+from fastapi.testclient import TestClient
 
 
 def test_db_test_endpoint_reports_connected_database(app):
@@ -15,6 +13,28 @@ def test_db_test_endpoint_reports_connected_database(app):
         "status": "ok",
         "database": "connected",
     }
+
+
+def test_db_test_endpoint_returns_503_when_database_is_unreachable(app, monkeypatch):
+    class _BrokenConnection:
+        def __enter__(self):
+            raise RuntimeError("db down")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _BrokenEngine:
+        def connect(self):
+            return _BrokenConnection()
+
+    monkeypatch.setattr(database, "engine", _BrokenEngine())
+    client = TestClient(app)
+
+    response = client.get("/api/db-test")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "error"
+    assert response.json()["database"] == "unreachable"
 
 
 def test_database_engine_uses_profile_pool_settings(monkeypatch):
