@@ -97,7 +97,7 @@ def test_batch7_full_system_flow_covers_auth_group_membership_auction_payment_an
         },
     )
     assert settle_response.status_code == 200
-    assert settle_response.json()["status"] == "settled"
+    assert settle_response.json()["status"] == "paid"
 
     db_session.expire_all()
     group = db_session.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
@@ -114,7 +114,7 @@ def test_batch7_full_system_flow_covers_auth_group_membership_auction_payment_an
     assert session is not None
     assert session.status == "finalized"
     assert payout is not None
-    assert payout.status == "settled"
+    assert payout.status == "paid"
     assert payout.reference_no == "B7-SETTLE-001"
 
     notifications = db_session.scalars(select(Notification)).all()

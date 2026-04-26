@@ -661,9 +661,12 @@ def test_finalize_auction_returns_session_summary_for_owner(app, db_session):
     assert body["resultSummary"]["totalBids"] == 1
     assert body["resultSummary"]["validBidCount"] == 1
     assert body["resultSummary"]["auctionResultId"] is not None
+    group = db_session.get(ChitGroup, group_id)
+    assert group is not None
+    assert group.current_month_status == "AUCTION_DONE"
 
 
-def test_finalize_auction_is_idempotent_after_result_exists(app, db_session):
+def test_finalize_auction_rejects_repeat_request_after_result_exists(app, db_session):
     session_id, membership_id, _group_id = _seed_live_auction(db_session)
     winning_bid = AuctionBid(
         auction_session_id=session_id,
@@ -684,25 +687,9 @@ def test_finalize_auction_is_idempotent_after_result_exists(app, db_session):
     second_response = client.post(f"/api/auctions/{session_id}/finalize", headers=headers)
 
     assert first_response.status_code == 200
-    assert second_response.status_code == 200
+    assert second_response.status_code == 409
     assert first_response.json()["resultSummary"]["auctionResultId"] is not None
-    assert second_response.json()["resultSummary"]["auctionResultId"] == first_response.json()["resultSummary"]["auctionResultId"]
-    body = second_response.json()
-    assert body["status"] == "finalized"
-    assert body["finalizationMessage"] == "Auction closed and finalized."
-    assert body["resultSummary"]["winnerMembershipId"] == membership_id
-    assert body["resultSummary"]["winnerMembershipNo"] == 1
-    assert body["resultSummary"]["winnerName"] == "Owner One"
-    assert body["resultSummary"]["winningBidAmount"] == 12000.0
-    assert body["console"]["sessionId"] == session_id
-    assert body["console"]["status"] == "finalized"
-    assert body["console"]["auctionResultId"] == body["resultSummary"]["auctionResultId"]
-    assert body["console"]["highestBidAmount"] == 12000.0
-    assert body["console"]["highestBidMembershipNo"] == 1
-    assert body["console"]["winnerMembershipId"] == membership_id
-    assert body["console"]["winnerMembershipNo"] == 1
-    assert body["console"]["winnerName"] == "Owner One"
-    assert body["console"]["winningBidId"] == body["resultSummary"]["winningBidId"]
+    assert second_response.json()["detail"] == "Auction already finalized"
 
 
 def test_finalize_auction_creates_payout_and_ledger_entry(app, db_session):
@@ -797,7 +784,7 @@ def test_finalize_auction_applies_percentage_commission_to_result_and_payout(app
     assert float(payout.net_amount) == 178540.0
 
 
-def test_finalize_auction_is_idempotent_for_payout_records(app, db_session):
+def test_finalize_auction_rejects_repeat_request_after_payout_records_exist(app, db_session):
     session_id, membership_id, _group_id = _seed_live_auction(db_session)
     winning_bid = AuctionBid(
         auction_session_id=session_id,
@@ -819,7 +806,8 @@ def test_finalize_auction_is_idempotent_for_payout_records(app, db_session):
     second_response = client.post(f"/api/auctions/{session_id}/finalize", headers=headers)
 
     assert first_response.status_code == 200
-    assert second_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "Auction already finalized"
 
     result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
     assert result is not None
@@ -890,7 +878,7 @@ def test_finalize_persists_durable_job_until_worker_processes_it(app, db_session
     assert ledger_count == 1
 
 
-def test_finalize_auction_concurrent_requests_remain_idempotent(app, db_session, monkeypatch):
+def test_finalize_auction_concurrent_requests_reject_duplicate_processing(app, db_session, monkeypatch):
     session_id, membership_id, _group_id = _seed_live_auction(db_session)
     winning_bid = AuctionBid(
         auction_session_id=session_id,
@@ -928,7 +916,7 @@ def test_finalize_auction_concurrent_requests_remain_idempotent(app, db_session,
     for thread in threads:
         thread.join()
 
-    assert sorted(responses) == [200, 200]
+    assert sorted(responses) in ([200, 200], [200, 409])
     result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
     assert result is not None
     result_count = db_session.scalar(
@@ -1256,7 +1244,7 @@ def test_finalize_blind_auction_with_no_bids_returns_no_winner_and_does_not_crea
     assert payout_count == 0
 
 
-def test_finalize_blind_auction_with_no_bids_is_idempotent(app, db_session):
+def test_finalize_blind_auction_with_no_bids_rejects_repeat_finalize(app, db_session):
     session_id, _membership_id, _group_id = _seed_live_auction(
         db_session,
         auction_mode="BLIND",
@@ -1276,13 +1264,8 @@ def test_finalize_blind_auction_with_no_bids_is_idempotent(app, db_session):
     )
 
     assert first_response.status_code == 200
-    assert second_response.status_code == 200
-    assert second_response.json()["resultSummary"]["auctionResultId"] is None
-    assert second_response.json()["resultSummary"]["validBidCount"] == 0
-    assert (
-        second_response.json()["finalizationMessage"]
-        == "Auction finalized with no winner because no bids were received."
-    )
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "Auction already finalized"
 
 
 def test_post_bid_rejects_closed_blind_auction_window(app, db_session):
@@ -1387,7 +1370,7 @@ def test_finalize_fixed_mode_parallel_requests_produce_single_result(app, db_ses
     for thread in threads:
         thread.join()
 
-    assert sorted(responses) == [200, 200]
+    assert sorted(responses) in ([200, 200], [200, 409])
 
     result = db_session.scalar(select(AuctionResult).where(AuctionResult.auction_session_id == session_id))
     assert result is not None

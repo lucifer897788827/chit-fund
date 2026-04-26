@@ -47,3 +47,8 @@ export async function settleOwnerPayout(payoutId, payload = {}) {
     () => apiClient.post(`/payouts/${payoutId}/settle`, payload),
   );
 }
+
+export async function markOwnerPayoutPaid(payoutId) {
+  const { data } = await apiClient.post(`/payouts/${payoutId}/mark-paid`);
+  return data;
+}

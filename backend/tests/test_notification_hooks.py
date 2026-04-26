@@ -231,7 +231,7 @@ def test_settle_owner_payout_creates_settlement_notifications(app, db_session):
         select(Notification).where(Notification.title == f"Payout settled for {subscriber.full_name}")
     ).all()
 
-    assert serialized["status"] == "settled"
+    assert serialized["status"] == "paid"
     assert payout.owner_id == owner.id
     assert len(notifications) == 4
     assert {notification.user_id for notification in notifications} == {owner.user_id, subscriber.user_id}

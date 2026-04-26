@@ -8,6 +8,7 @@ from app.core.security import CurrentUser
 from app.models import AuditLog, ChitGroup, GroupMembership, Installment, Owner, Payout, Subscriber, User
 from app.models.auction import AuctionBid, AuctionResult, AuctionSession
 from app.modules.auctions.service import finalize_auction, finalize_auction_post_processing, place_bid
+from app.modules.groups.service import close_group_collection
 from app.modules.groups.join_service import join_group
 from app.modules.payments.payout_service import settle_owner_payout
 from app.modules.payments.service import record_payment
@@ -226,6 +227,32 @@ def test_join_group_records_audit_event(db_session):
     assert audit_row.metadata_json == f'{{"groupId":{group.id},"memberNo":3,"subscriberId":{current_user.subscriber.id}}}'
 
 
+def test_close_group_collection_records_audit_event(db_session):
+    group = _seed_group(db_session)
+    current_user = _owner_current_user(db_session)
+
+    result = close_group_collection(db_session, group.id, current_user)
+
+    audit_row = db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.entity_type == "chit_group", AuditLog.entity_id == str(group.id))
+        .order_by(AuditLog.id.desc())
+    )
+    assert result["id"] == group.id
+    assert audit_row is not None
+    assert audit_row.action == "group.collection_closed"
+    assert audit_row.actor_user_id == current_user.user.id
+    assert audit_row.owner_id == group.owner_id
+    assert json.loads(audit_row.metadata_json) == {
+        "groupId": group.id,
+        "currentCycleNo": 1,
+    }
+    assert json.loads(audit_row.after_json) == {
+        "collectionClosed": True,
+        "currentMonthStatus": "COLLECTION_CLOSED",
+    }
+
+
 def test_finalize_auction_records_audit_event(db_session):
     group = _seed_group(db_session)
     membership = _seed_group_membership(db_session, group, subscriber_id=2, member_no=1)
@@ -321,7 +348,7 @@ def test_settle_owner_payout_records_audit_event(db_session):
     assert payout_row.entity_id == str(payout.id)
     assert payout_row.actor_user_id == current_user.user.id
     assert payout_row.owner_id == group.owner_id
-    assert settled["status"] == "settled"
+    assert settled["status"] == "paid"
     metadata = json.loads(payout_row.metadata_json)
     assert metadata["auctionResultId"] == auction_result.id
     assert metadata["groupId"] == group.id
@@ -333,11 +360,11 @@ def test_settle_owner_payout_records_audit_event(db_session):
     assert metadata["payoutMethod"] == "bank_transfer"
     assert metadata["payoutDate"] == "2026-05-12"
     assert metadata["referenceNo"] == "SETTLE-001"
-    assert metadata["status"] == "settled"
+    assert metadata["status"] == "paid"
     assert metadata["payoutId"] == payout.id
     assert isinstance(metadata["ledgerEntryId"], int)
     assert json.loads(payout_row.before_json)["status"] == "pending"
-    assert json.loads(payout_row.after_json)["status"] == "settled"
+    assert json.loads(payout_row.after_json)["status"] == "paid"
 
     payout_count = db_session.scalar(
         select(func.count(AuditLog.id)).where(

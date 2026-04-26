@@ -12,7 +12,7 @@ function collectErrorMessages(value) {
   }
 
   if (typeof value === "object") {
-    return ["message", "detail", "error", "non_field_errors"]
+    return ["error", "message", "detail", "non_field_errors", "msg"]
       .flatMap((key) => collectErrorMessages(value[key]))
       .filter(Boolean);
   }

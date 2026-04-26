@@ -16,7 +16,7 @@ from app.core.money import money_int
 from app.core.security import CurrentUser, require_owner, require_subscriber
 from app.core.time import utcnow
 from app.models.auction import AuctionBid, AuctionResult, AuctionSession, FinalizeJob
-from app.models.chit import ChitGroup, GroupMembership, Installment
+from app.models.chit import ChitGroup, CurrentMonthStatus, GroupMembership, Installment
 from app.models.money import LedgerEntry, Payment, Payout
 from app.models.user import Owner, Subscriber, User
 from app.modules.auctions.commission_service import calculate_owner_commission_amount
@@ -67,6 +67,31 @@ def _log_finalize_trace(
         extra_payload["duration_ms"] = round(duration_ms, 2)
     extra_payload.update(extra_fields)
     logger.info(message, extra=extra_payload)
+
+
+_FINALIZE_PROFILE_KEY = "auction_finalize_profile"
+
+
+def _record_finalize_profile_metric(db: Session, metric: str, duration_ms: float) -> None:
+    profile = db.info.setdefault(_FINALIZE_PROFILE_KEY, {})
+    profile[metric] = round(float(profile.get(metric, 0.0)) + float(duration_ms), 2)
+
+
+def _log_finalize_profile_breakdown(db: Session, *, session_id: int, group_id: int | None = None) -> None:
+    profile = db.info.pop(_FINALIZE_PROFILE_KEY, None) or {}
+    if not profile:
+        return
+    logger.info(
+        "Auction finalize profile",
+        extra={
+            "event": "auction.finalize.profile",
+            "session_id": int(session_id),
+            "group_id": int(group_id) if group_id is not None else None,
+            "fetch_bids_ms": round(float(profile.get("fetch_bids", 0.0)), 2),
+            "compute_ms": round(float(profile.get("compute", 0.0)), 2),
+            "db_write_ms": round(float(profile.get("db_write", 0.0)), 2),
+        },
+    )
 
 
 @dataclass(slots=True)
@@ -893,6 +918,8 @@ def persist_auction_result(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chit group not found")
     if should_advance_group:
         _advance_group_cycle(resolved_group, session)
+    resolved_group.current_month_status = CurrentMonthStatus.AUCTION_DONE.value
+    resolved_group.updated_at = utcnow()
 
     if existing_result is None:
         result = AuctionResult(
@@ -951,6 +978,7 @@ def select_winning_bid(db: Session, session_id: int) -> AuctionBid | None:
             AuctionBid.placed_at.asc(),
             AuctionBid.id.asc(),
         )
+        .limit(1)
     )
 
 
@@ -1392,6 +1420,43 @@ def _dispatch_finalize_post_processing_task_nonblocking(session_id: int) -> None
     ).start()
 
 
+def _dispatch_payout_expansion_task(payout_id: int) -> None:
+    try:
+        from app.tasks.auction_tasks import expand_payout_derivatives
+
+        expand_payout_derivatives.delay(int(payout_id))
+        logger.info(
+            "Payout expansion task dispatched",
+            extra={
+                "event": "auction.payout_expansion.task.dispatched",
+                "payout_id": int(payout_id),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Payout expansion task dispatch failed",
+            extra={
+                "event": "auction.payout_expansion.task.dispatch_failed",
+                "payout_id": int(payout_id),
+            },
+        )
+
+
+def _dispatch_payout_expansion_task_nonblocking(payout_id: int) -> None:
+    if "pytest" in sys.modules:
+        _dispatch_payout_expansion_task(payout_id)
+        return
+    if _finalize_task_executes_inline():
+        Thread(
+            target=_dispatch_payout_expansion_task,
+            args=(int(payout_id),),
+            daemon=True,
+            name=f"auction-payout-expansion-{int(payout_id)}",
+        ).start()
+        return
+    _dispatch_payout_expansion_task(payout_id)
+
+
 def _finalize_job_timeout_cutoff(now: datetime | None = None) -> datetime:
     return _normalize_datetime(now or utcnow()) - timedelta(seconds=int(settings.finalize_job_processing_timeout_seconds))
 
@@ -1678,6 +1743,7 @@ def _run_finalize_post_processing(
     )
 
     try:
+        db_write_started_at = perf_counter()
         winner_membership = db.scalar(
             select(GroupMembership).where(
                 GroupMembership.id == result.winner_membership_id,
@@ -1690,6 +1756,8 @@ def _run_finalize_post_processing(
         _ensure_winner_membership_prized(db, membership=winner_membership, cycle_no=session.cycle_no)
         if int(group.current_cycle_no or 1) <= int(session.cycle_no):
             _advance_group_cycle(group, session)
+        group.current_month_status = CurrentMonthStatus.AUCTION_DONE.value
+        group.updated_at = utcnow()
         _raise_if_finalize_job_timed_out(started_at, session_id=session_id)
 
         payout_result = ensure_auction_payout(
@@ -1697,19 +1765,10 @@ def _run_finalize_post_processing(
             result=result,
             group=group,
             membership=winner_membership,
+            expand_derivatives=False,
         )
         payout = payout_result[0] if isinstance(payout_result, tuple) else payout_result
         _raise_if_finalize_job_timed_out(started_at, session_id=session_id)
-        winner_subscriber = db.get(Subscriber, winner_membership.subscriber_id)
-        notify_auction_finalized(
-            db,
-            session=session,
-            result=result,
-            group=group,
-            owner=db.get(Owner, group.owner_id),
-            winner_membership=winner_membership,
-            winner_subscriber=winner_subscriber,
-        )
         duration_ms = round((perf_counter() - started_at) * 1000, 2)
         logger.info(
             "Auction finalize post-processing completed",
@@ -1721,10 +1780,12 @@ def _run_finalize_post_processing(
                 "payout_id": getattr(payout, "id", None),
             },
         )
+        _record_finalize_profile_metric(db, "db_write", (perf_counter() - db_write_started_at) * 1000)
         return {
             "sessionId": session.id,
             "auctionResultId": result.id,
             "payoutId": getattr(payout, "id", None),
+            "payoutExpanded": bool(getattr(payout, "payout_expanded", False)),
             "processed": True,
         }
     except Exception:
@@ -1749,6 +1810,9 @@ def finalize_auction_post_processing(
         result = _run_finalize_post_processing(db, session_id=session_id)
         db.commit()
         dispatch_staged_notifications(db)
+        payout_id = int(result["payoutId"]) if isinstance(result, dict) and result.get("payoutId") is not None else None
+        if payout_id is not None:
+            _dispatch_payout_expansion_task_nonblocking(payout_id)
         return result
     except Exception:
         db.rollback()
@@ -1760,6 +1824,103 @@ def finalize_auction_post_processing(
             },
         )
         raise
+
+
+def _process_finalize_job_inline(
+    db: Session,
+    *,
+    session_id: int,
+    current_user: CurrentUser | None = None,
+) -> dict | None:
+    job = _claim_finalize_job(db, auction_id=session_id)
+    if job is None:
+        return None
+
+    try:
+        result = _run_finalize_post_processing(db, session_id=job.auction_id)
+        inline_response = None
+        session = db.get(AuctionSession, session_id)
+        auction_result_id = result.get("auctionResultId") if isinstance(result, dict) else None
+        if session is not None and auction_result_id is not None:
+            group = db.get(ChitGroup, session.group_id)
+            auction_result = db.get(AuctionResult, int(auction_result_id))
+            if group is not None and auction_result is not None:
+                total_bid_count, valid_bid_count = _get_bid_count_snapshot(db, session.id)
+                winner_details = _get_membership_display_details_joined(db, auction_result.winner_membership_id)
+                fallback_finalized_by_user_id = (
+                    current_user.user.id
+                    if current_user is not None
+                    else session.closed_by_user_id or auction_result.finalized_by_user_id
+                )
+                finalized_by_name = (
+                    current_user.owner.display_name
+                    if current_user is not None and current_user.owner is not None
+                    else None
+                )
+                inline_response = _build_finalization_response(
+                    db,
+                    session=session,
+                    group=group,
+                    result=auction_result,
+                    current_user=current_user,
+                    fallback_finalized_by_user_id=fallback_finalized_by_user_id,
+                    total_bids=total_bid_count,
+                    valid_bid_count=valid_bid_count,
+                    winner_details=winner_details,
+                    finalized_by_name=finalized_by_name,
+                )
+        job.status = "done"
+        job.last_error = None
+        job.updated_at = utcnow()
+        db.flush()
+        db.commit()
+        dispatch_staged_notifications(db)
+        payout_id = int(result["payoutId"]) if isinstance(result, dict) and result.get("payoutId") is not None else None
+        if payout_id is not None:
+            _dispatch_payout_expansion_task_nonblocking(payout_id)
+        logger.info(
+            "Finalize job completed inline",
+            extra={
+                "event": "auction.finalize.job.completed_inline",
+                "finalize_job_id": job.id,
+                "auction_session_id": job.auction_id,
+                "retry_count": int(job.retry_count or 0),
+                **result,
+            },
+        )
+        return inline_response
+    except Exception as exc:
+        db.rollback()
+        job = db.get(FinalizeJob, job.id)
+        if job is None:
+            logger.exception(
+                "Finalize job processing failed inline",
+                extra={
+                    "event": "auction.finalize.job.inline_failed",
+                    "auction_session_id": session_id,
+                },
+            )
+            return None
+        status_value = _mark_finalize_job_stuck_or_failed(
+            db,
+            job=job,
+            error_message="Finalize job failed: " + _truncate_finalize_job_error(exc),
+        )
+        db.commit()
+        logger.exception(
+            "Finalize job processing failed inline",
+            extra={
+                "event": "auction.finalize.job.inline_retry"
+                if status_value != "failed"
+                else "auction.finalize.job.inline_failed",
+                "auction_session_id": job.auction_id,
+                "finalize_job_id": job.id,
+                "retry_count": job.retry_count,
+                "status": job.status,
+                "last_error": job.last_error,
+            },
+        )
+        return None
 
 
 def process_pending_finalize_jobs(
@@ -1792,6 +1953,9 @@ def process_pending_finalize_jobs(
             db.flush()
             db.commit()
             dispatch_staged_notifications(db)
+            payout_id = int(result["payoutId"]) if isinstance(result, dict) and result.get("payoutId") is not None else None
+            if payout_id is not None:
+                _dispatch_payout_expansion_task_nonblocking(payout_id)
             payload = {
                 "jobId": job.id,
                 "auctionId": job.auction_id,
@@ -2017,6 +2181,7 @@ def _finalize_loaded_auction_session(
             step="selecting-bids",
         )
         total_bid_count, valid_bid_count = _get_bid_count_snapshot(db, session.id)
+        _record_finalize_profile_metric(db, "fetch_bids", (perf_counter() - step_started_at) * 1000)
         _log_finalize_trace(
             "STEP DONE: selecting bids",
             session_id=session.id,
@@ -2114,6 +2279,8 @@ def _finalize_loaded_auction_session(
                 group=group,
                 effective_now=effective_now,
             )
+            _record_finalize_profile_metric(db, "fetch_bids", (perf_counter() - step_started_at) * 1000)
+            compute_started_at = perf_counter()
             if winning_bid is not None and winner_membership_id is not None:
                 payout_snapshot = _build_minimal_payout_snapshot(
                     session=session,
@@ -2124,6 +2291,7 @@ def _finalize_loaded_auction_session(
                     total_bid_count = 1
                     valid_bid_count = 1
                 winner_details = _get_membership_display_details_joined(db, winner_membership_id)
+            _record_finalize_profile_metric(db, "compute", (perf_counter() - compute_started_at) * 1000)
             _log_finalize_trace(
                 "STEP DONE: selecting winner",
                 session_id=session.id,
@@ -2136,6 +2304,7 @@ def _finalize_loaded_auction_session(
             _log_finalize_step("winner-selected", step_started_at)
 
         step_started_at = perf_counter()
+        db_write_started_at = perf_counter()
         _log_finalize_trace(
             "STEP: DB transaction begin",
             session_id=session.id,
@@ -2150,6 +2319,8 @@ def _finalize_loaded_auction_session(
         if winning_bid is not None:
             session.winning_bid_id = winning_bid.id
         session.updated_at = effective_now
+        group.current_month_status = CurrentMonthStatus.AUCTION_DONE.value
+        group.updated_at = effective_now
 
         if result is None and winning_bid is not None and winner_membership_id is not None and payout_snapshot is not None:
             result = _create_or_update_minimal_auction_result(
@@ -2201,6 +2372,7 @@ def _finalize_loaded_auction_session(
             step="db-commit-finalize",
         )
         db.commit()
+        _record_finalize_profile_metric(db, "db_write", (perf_counter() - db_write_started_at) * 1000)
         _log_finalize_trace(
             "STEP DONE: DB commit",
             session_id=session.id,
@@ -2584,6 +2756,16 @@ def _finalize_task_executes_inline() -> bool:
         return False
 
 
+def _raise_if_finalize_already_processed(session: AuctionSession) -> None:
+    if session.status == "finalized":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Auction already finalized")
+    if session.status == "finalizing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Auction finalization already in progress",
+        )
+
+
 def _build_inline_finalization_response(
     db: Session,
     *,
@@ -2885,6 +3067,7 @@ def _finalize_auction_async_request(db: Session, session_id: int, current_user: 
         current_user=current_user,
     )
     effective_now = utcnow()
+    _raise_if_finalize_already_processed(context.session)
     if context.session.status not in {"open", "closed", "finalizing", "finalized"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Auction session cannot be finalized")
     if not _can_enqueue_finalize_request_from_context(
@@ -2935,6 +3118,7 @@ def _finalize_auction_fast(db: Session, session_id: int, current_user: CurrentUs
         session, group = _get_owner_session(db, session_id, current_user)
         effective_now = utcnow()
 
+        _raise_if_finalize_already_processed(session)
         if session.status not in {"open", "closed", "finalizing", "finalized"}:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Auction session cannot be finalized")
 
@@ -2951,14 +3135,17 @@ def _finalize_auction_fast(db: Session, session_id: int, current_user: CurrentUs
         ensure_finalize_job_enqueued(db, session.id)
 
         db.commit()
-        _dispatch_finalize_post_processing_task_nonblocking(session.id)
         if _finalize_task_executes_inline():
+            inline_response = _process_finalize_job_inline(db, session_id=session.id, current_user=current_user)
+            if inline_response is not None:
+                return inline_response
             db.expire_all()
             return _build_inline_finalization_response(
                 db,
                 session_id=session.id,
                 current_user=current_user,
             )
+        _dispatch_finalize_post_processing_task_nonblocking(session.id)
         return _build_enqueued_finalize_response(
             db,
             session=session,
@@ -2998,6 +3185,13 @@ def finalize_auction(db: Session, session_id: int, current_user: CurrentUser) ->
     )
     try:
         result = _finalize_auction_fast(db, session_id, current_user)
+        group_id = None
+        console = result.get("console") if isinstance(result, dict) else None
+        if isinstance(console, dict):
+            group_id = console.get("groupId")
+        if group_id is None and isinstance(result, dict):
+            group_id = result.get("groupId")
+        _log_finalize_profile_breakdown(db, session_id=session_id, group_id=group_id)
         _log_finalize_trace(
             "FINALIZE DONE",
             session_id=session_id,
@@ -3021,8 +3215,16 @@ def finalize_auction(db: Session, session_id: int, current_user: CurrentUser) ->
             current_user=current_user,
         )
         if recovered_response is not None:
+            recovered_status = recovered_response.get("status")
+            if recovered_status == "finalizing":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Auction finalization already in progress",
+                )
+            if recovered_status == "finalized":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Auction already finalized")
             return recovered_response
-        raise
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Auction already finalized")
     except Exception:
         logger.exception(
             "FINALIZE FAILED",

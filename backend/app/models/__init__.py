@@ -4,7 +4,7 @@ from app.models.chit import ChitGroup, GroupMembership, Installment, MembershipS
 from app.models.external import ExternalChit, ExternalChitEntry
 from app.models.job_tracking import JobRun
 from app.models.money import LedgerEntry, Payment, Payout
-from app.models.support import AuditLog, Notification
+from app.models.support import AdminMessage, AuditLog, Notification
 from app.models.user import Owner, OwnerRequest, Subscriber, User
 
 __all__ = [
@@ -29,4 +29,5 @@ __all__ = [
     "JobRun",
     "Notification",
     "AuditLog",
+    "AdminMessage",
 ]

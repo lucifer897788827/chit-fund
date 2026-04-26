@@ -8,15 +8,20 @@ from app.modules.groups.schemas import (
     AuctionSessionCreate,
     AuctionSessionResponse,
     GroupCreate,
+    GroupMemberSummaryResponse,
     GroupResponse,
+    GroupStatusResponse,
     MembershipCreate,
     MembershipResponse,
 )
 from app.modules.groups.join_service import join_group
 from app.modules.groups.service import (
+    close_group_collection,
     create_auction_session,
     create_group,
     create_membership,
+    get_group_member_summary,
+    get_group_status,
     list_groups,
 )
 
@@ -54,6 +59,33 @@ async def create_membership_endpoint(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return create_membership(db, group_id, payload, current_user)
+
+
+@router.post("/{group_id}/close-collection", response_model=GroupResponse)
+async def close_group_collection_endpoint(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return close_group_collection(db, group_id, current_user)
+
+
+@router.get("/{group_id}/status", response_model=GroupStatusResponse)
+async def get_group_status_endpoint(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return get_group_status(db, group_id, current_user)
+
+
+@router.get("/{group_id}/member-summary", response_model=list[GroupMemberSummaryResponse])
+async def get_group_member_summary_endpoint(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return get_group_member_summary(db, group_id, current_user)
 
 
 @router.post(

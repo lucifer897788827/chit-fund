@@ -2,9 +2,10 @@ from datetime import date, datetime
 import math
 from typing import Any
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from app.core.money import parse_whole_amount
+from app.models.chit import CurrentMonthStatus
 
 
 class GroupCreate(BaseModel):
@@ -71,7 +72,27 @@ class GroupResponse(GroupCreate):
     id: int
     currentCycleNo: int
     biddingEnabled: bool
+    collectionClosed: bool = False
+    currentMonthStatus: CurrentMonthStatus = CurrentMonthStatus.OPEN
     status: str
+
+
+class GroupStatusResponse(BaseModel):
+    collection_closed: bool
+    status: CurrentMonthStatus
+    paid_members: int
+    total_members: int
+
+
+class GroupMemberSummaryResponse(BaseModel):
+    membershipId: int
+    subscriberId: int
+    memberNo: int
+    memberName: str | None = None
+    paid: int
+    received: int
+    dividend: int
+    net: int
 
 
 class MembershipCreate(BaseModel):
@@ -102,6 +123,7 @@ class AuctionSessionCreate(BaseModel):
     biddingWindowSeconds: int = 180
     startTime: datetime | None = None
     endTime: datetime | None = None
+    allowWithPending: bool = Field(default=False, validation_alias=AliasChoices("allowWithPending", "allow_with_pending"))
 
     @field_validator("commissionValue", mode="before")
     @classmethod

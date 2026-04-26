@@ -8,7 +8,7 @@ from app.models.auction import AuctionBid, AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, GroupMembership
 from app.models.money import LedgerEntry, Payout
 from app.models.user import Subscriber
-from app.modules.payments.payout_service import ensure_auction_payout
+from app.modules.payments.payout_service import ensure_auction_payout, expand_auction_payout_derivatives
 
 
 def _seed_payout_result(db_session, *, owner_id: int = 1):
@@ -164,3 +164,30 @@ def test_ensure_auction_payout_rejects_owner_mismatch(app, db_session):
         ensure_auction_payout(db_session, result=result)
 
     assert exc_info.value.status_code == 403
+
+
+def test_ensure_auction_payout_can_defer_derived_expansion(app, db_session):
+    group, membership, _session, result = _seed_payout_result(db_session)
+
+    payout, ledger_entry = ensure_auction_payout(
+        db_session,
+        result=result,
+        expand_derivatives=False,
+    )
+
+    assert payout.owner_id == group.owner_id
+    assert payout.payout_expanded is False
+    assert ledger_entry is None
+    assert db_session.scalar(
+        select(LedgerEntry).where(
+            LedgerEntry.source_table == "payouts",
+            LedgerEntry.source_id == payout.id,
+        )
+    ) is None
+
+    expanded_payout, expanded_ledger = expand_auction_payout_derivatives(db_session, payout_id=payout.id)
+
+    assert expanded_payout.id == payout.id
+    assert expanded_payout.payout_expanded is True
+    assert expanded_ledger is not None
+    assert expanded_ledger.source_id == payout.id

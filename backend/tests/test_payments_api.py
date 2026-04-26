@@ -559,6 +559,7 @@ def test_owner_payout_listing_and_settlement(app, db_session):
             "payoutDate": "2026-05-11",
             "referenceNo": None,
             "status": "pending",
+            "paidAt": None,
             "paymentStatus": "FULL",
             "penaltyAmount": None,
             "arrearsAmount": 0.0,
@@ -600,16 +601,49 @@ def test_owner_payout_listing_and_settlement(app, db_session):
     )
     assert settle_response.status_code == 200
     settled = settle_response.json()
-    assert settled["status"] == "settled"
+    assert settled["status"] == "paid"
     assert settled["referenceNo"] == "NEFT-SETTLE-001"
     assert settled["payoutMethod"] == "bank_transfer"
     assert settled["payoutDate"] == "2026-05-12"
+    assert settled["paidAt"] is not None
 
     db_session.refresh(payout)
-    assert payout.status == "settled"
+    assert payout.status == "paid"
+    assert payout.paid_at is not None
     assert payout.reference_no == "NEFT-SETTLE-001"
     assert payout.payout_method == "bank_transfer"
     assert payout.payout_date.isoformat() == "2026-05-12"
+
+
+def test_mark_payout_paid_endpoint_updates_group_lifecycle(app, db_session):
+    _owner, _subscriber, group, _membership, _result, payout = _seed_payout_target(db_session)
+    client = TestClient(app)
+    headers = _owner_headers(client)
+
+    response = client.post(f"/api/payouts/{payout.id}/mark-paid", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "paid"
+    assert body["paidAt"] is not None
+    db_session.refresh(payout)
+    db_session.refresh(group)
+    assert payout.status == "paid"
+    assert payout.paid_at is not None
+    assert group.current_month_status == "PAYOUT_DONE"
+
+
+def test_mark_payout_paid_rejects_duplicate_action(app, db_session):
+    _owner, _subscriber, _group, _membership, _result, payout = _seed_payout_target(db_session)
+    client = TestClient(app)
+    headers = _owner_headers(client)
+
+    first_response = client.post(f"/api/payouts/{payout.id}/mark-paid", headers=headers)
+    second_response = client.post(f"/api/payouts/{payout.id}/mark-paid", headers=headers)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "Payout already paid"
 
 
 def test_payout_listing_requires_owner_profile(app):

@@ -1,10 +1,18 @@
 from decimal import Decimal
 from datetime import date, datetime
+from enum import StrEnum
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+
+
+class CurrentMonthStatus(StrEnum):
+    OPEN = "OPEN"
+    COLLECTION_CLOSED = "COLLECTION_CLOSED"
+    AUCTION_DONE = "AUCTION_DONE"
+    PAYOUT_DONE = "PAYOUT_DONE"
 
 
 class ChitGroup(Base):
@@ -25,6 +33,8 @@ class ChitGroup(Base):
     first_auction_date: Mapped[date] = mapped_column(Date)
     current_cycle_no: Mapped[int] = mapped_column(Integer, default=1)
     bidding_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    collection_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    current_month_status: Mapped[str] = mapped_column(String(30), default=CurrentMonthStatus.OPEN.value)
     penalty_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     penalty_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     penalty_value: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)

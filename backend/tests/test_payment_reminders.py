@@ -111,7 +111,7 @@ def test_queue_payment_reminders_creates_due_and_overdue_notifications(app, db_s
 
     assert len(notifications) == 4
     assert {notification.channel for notification in notifications} == {"in_app", "email"}
-    assert {notification.status for notification in notifications} == {"pending", "skipped"}
+    assert {notification.status for notification in notifications} == {"pending"}
     assert sum(1 for notification in notifications if notification.title.startswith("Due payment reminder")) == 2
     assert sum(1 for notification in notifications if notification.title.startswith("Overdue payment reminder")) == 2
     assert all(subscriber.full_name in notification.message for notification in notifications)

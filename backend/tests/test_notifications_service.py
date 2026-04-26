@@ -255,4 +255,4 @@ def test_finalize_auction_creates_notifications_for_owner_and_winner(app, db_ses
     assert len(notifications) == 4
     assert {notification.user_id for notification in notifications} == {owner_user.id, winner_user.id}
     assert {notification.channel for notification in notifications} == {"in_app", "email"}
-    assert {notification.status for notification in notifications} == {"pending", "skipped"}
+    assert {notification.status for notification in notifications} == {"pending"}

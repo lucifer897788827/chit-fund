@@ -1,6 +1,6 @@
 import { apiClient } from "../../lib/api/client";
 
-import { fetchOwnerPayouts, fetchPaymentBalances, fetchPayments, recordPayment, settleOwnerPayout } from "./api";
+import { fetchOwnerPayouts, fetchPaymentBalances, fetchPayments, markOwnerPayoutPaid, recordPayment, settleOwnerPayout } from "./api";
 
 jest.mock("../../lib/api/client", () => ({
   apiClient: {
@@ -110,4 +110,18 @@ test("settleOwnerPayout posts the payout settlement command", async () => {
   expect(apiClient.post).toHaveBeenCalledWith("/payments/payouts/71/settle", {
     referenceNo: "NEFT-9911",
   });
+});
+
+test("markOwnerPayoutPaid posts the canonical mark-paid command", async () => {
+  apiClient.post.mockResolvedValueOnce({
+    data: { id: 71, status: "paid", paidAt: "2026-04-26T10:00:00Z" },
+  });
+
+  await expect(markOwnerPayoutPaid(71)).resolves.toEqual({
+    id: 71,
+    status: "paid",
+    paidAt: "2026-04-26T10:00:00Z",
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/payouts/71/mark-paid");
 });

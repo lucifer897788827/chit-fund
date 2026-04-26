@@ -4,7 +4,10 @@ import {
   acceptGroupInvite,
   approveGroupMembershipRequest,
   createGroup,
+  closeGroupCollection,
+  fetchGroupMemberSummary,
   fetchGroups,
+  fetchGroupStatus,
   fetchOwnerAuctionConsole,
   fetchOwnerMembershipRequests,
   fetchPublicChits,
@@ -180,6 +183,72 @@ test("createGroup posts a new group payload", async () => {
   await expect(createGroup(payload)).resolves.toEqual({ id: 11, ...payload });
 
   expect(apiClient.post).toHaveBeenCalledWith("/groups", payload);
+});
+
+test("fetchGroupStatus requests backend lifecycle status for a group", async () => {
+  apiClient.get.mockResolvedValue({
+    data: {
+      collection_closed: true,
+      status: "COLLECTION_CLOSED",
+      paid_members: 2,
+      total_members: 2,
+    },
+  });
+
+  await expect(fetchGroupStatus(42)).resolves.toEqual({
+    collection_closed: true,
+    status: "COLLECTION_CLOSED",
+    paid_members: 2,
+    total_members: 2,
+  });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/42/status");
+});
+
+test("fetchGroupMemberSummary requests backend member summaries for a group", async () => {
+  apiClient.get.mockResolvedValue({
+    data: [
+      {
+        membershipId: 12,
+        memberName: "Asha Devi",
+        paid: 5000,
+        received: 0,
+        dividend: 250,
+        net: -4750,
+      },
+    ],
+  });
+
+  await expect(fetchGroupMemberSummary(42)).resolves.toEqual([
+    {
+      membershipId: 12,
+      memberName: "Asha Devi",
+      paid: 5000,
+      received: 0,
+      dividend: 250,
+      net: -4750,
+    },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/42/member-summary");
+});
+
+test("closeGroupCollection posts backend collection close command", async () => {
+  apiClient.post.mockResolvedValue({
+    data: {
+      id: 42,
+      collectionClosed: true,
+      currentMonthStatus: "COLLECTION_CLOSED",
+    },
+  });
+
+  await expect(closeGroupCollection(42)).resolves.toEqual({
+    id: 42,
+    collectionClosed: true,
+    currentMonthStatus: "COLLECTION_CLOSED",
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/42/close-collection");
 });
 
 test("fetchOwnerAuctionConsole requests the owner console payload for a session", async () => {

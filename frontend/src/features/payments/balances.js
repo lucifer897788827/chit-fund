@@ -67,6 +67,14 @@ export function formatMoney(value, options = {}) {
   return `${currencyLabel} ${formattedAmount}`;
 }
 
+export function calculateNetFinancialPosition({ received = 0, dividend = 0, paid = 0 } = {}) {
+  const totalReceived = normalizeAmount(received);
+  const dividendEarned = normalizeAmount(dividend);
+  const totalPaid = normalizeAmount(paid);
+
+  return totalReceived + dividendEarned - totalPaid;
+}
+
 function getOptionalAmount(value) {
   if (value == null || value === "") {
     return null;

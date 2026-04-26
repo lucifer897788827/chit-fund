@@ -3,9 +3,10 @@ from datetime import date, datetime, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.models.auction import AuctionBid, AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, GroupMembership, Installment, MembershipSlot
 from app.models.external import ExternalChit
-from app.models.money import Payment
+from app.models.money import Payment, Payout
 from app.models.user import Owner, Subscriber, User
 
 
@@ -13,6 +14,15 @@ def _owner_headers(client: TestClient) -> dict[str, str]:
     response = client.post(
         "/api/auth/login",
         json={"phone": "9999999999", "password": "secret123"},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def _subscriber_headers(client: TestClient) -> dict[str, str]:
+    response = client.post(
+        "/api/auth/login",
+        json={"phone": "8888888888", "password": "pass123"},
     )
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
@@ -382,6 +392,278 @@ def test_list_groups_supports_pagination(app):
     assert len(body["items"]) == 1
 
 
+def test_close_collection_persists_group_lifecycle_state(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "CLOSE-001",
+            "title": "Close Collection Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    response = client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["collectionClosed"] is True
+    assert response.json()["currentMonthStatus"] == "COLLECTION_CLOSED"
+    group = db_session.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    assert group is not None
+    assert group.collection_closed is True
+    assert group.current_month_status == "COLLECTION_CLOSED"
+
+
+def test_close_collection_rejects_duplicate_close(app):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "CLOSE-002",
+            "title": "Close Collection Duplicate Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    first_response = client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
+    duplicate_response = client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
+
+    assert first_response.status_code == 200
+    assert duplicate_response.status_code == 409
+    assert duplicate_response.json()["detail"] == "Collection is already closed"
+
+
+def test_close_collection_requires_owner_profile(app):
+    client = TestClient(app)
+    owner_headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=owner_headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "CLOSE-003",
+            "title": "Close Collection Owner Only Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-06-01",
+            "firstAuctionDate": "2026-06-10",
+        },
+    )
+
+    response = client.post(
+        f"/api/groups/{group_response.json()['id']}/close-collection",
+        headers=_subscriber_headers(client),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Owner profile required"
+
+
+def test_close_collection_requires_authentication(app):
+    client = TestClient(app)
+
+    group_response = client.post(
+        "/api/groups",
+        headers=_owner_headers(client),
+        json={
+            "ownerId": 1,
+            "groupCode": "B7-AUTH-001",
+            "title": "Authentication Check Group",
+            "chitValue": 120000,
+            "installmentAmount": 10000,
+            "memberCount": 12,
+            "cycleCount": 12,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-06-01",
+            "firstAuctionDate": "2026-06-10",
+        },
+    )
+    assert group_response.status_code == 201
+
+    response = client.post(f"/api/groups/{group_response.json()['id']}/close-collection")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Not authenticated"
+
+
+def test_group_status_returns_lifecycle_and_payment_counts(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "STATUS-001",
+            "title": "Status Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+    membership_response = client.post(
+        f"/api/groups/{group_id}/memberships",
+        headers=headers,
+        json={"subscriberId": 1, "memberNo": 1},
+    )
+    membership_id = membership_response.json()["id"]
+    installment = db_session.scalar(
+        select(Installment).where(
+            Installment.group_id == group_id,
+            Installment.membership_id == membership_id,
+            Installment.cycle_no == 1,
+        )
+    )
+    assert installment is not None
+    installment.status = "paid"
+    installment.paid_amount = installment.due_amount
+    installment.balance_amount = 0
+    db_session.commit()
+
+    response = client.get(f"/api/groups/{group_id}/status", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "collection_closed": False,
+        "status": "OPEN",
+        "paid_members": 1,
+        "total_members": 1,
+    }
+
+
+def test_group_member_summary_returns_member_financials(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "MEM-SUM-001",
+            "title": "Member Summary Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+    membership_response = client.post(
+        f"/api/groups/{group_id}/memberships",
+        headers=headers,
+        json={"subscriberId": 1, "memberNo": 1},
+    )
+    membership_id = membership_response.json()["id"]
+    session = AuctionSession(
+        group_id=group_id,
+        cycle_no=1,
+        scheduled_start_at=datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc),
+        actual_start_at=datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc),
+        bidding_window_seconds=180,
+        status="finalized",
+        opened_by_user_id=1,
+        closed_by_user_id=1,
+    )
+    db_session.add(session)
+    db_session.flush()
+    bid = AuctionBid(
+        auction_session_id=session.id,
+        membership_id=membership_id,
+        bidder_user_id=1,
+        idempotency_key="member-summary-bid",
+        bid_amount=1000,
+        bid_discount_amount=0,
+        placed_at=datetime(2026, 8, 10, 10, 1, tzinfo=timezone.utc),
+        is_valid=True,
+    )
+    db_session.add(bid)
+    db_session.flush()
+    result = AuctionResult(
+        auction_session_id=session.id,
+        group_id=group_id,
+        cycle_no=1,
+        winner_membership_id=membership_id,
+        winning_bid_id=bid.id,
+        winning_bid_amount=1000,
+        dividend_pool_amount=1000,
+        dividend_per_member_amount=100,
+        owner_commission_amount=0,
+        winner_payout_amount=99000,
+        finalized_by_user_id=1,
+        finalized_at=datetime(2026, 8, 10, 10, 3, tzinfo=timezone.utc),
+    )
+    db_session.add(result)
+    db_session.flush()
+    db_session.add_all(
+        [
+            Payment(
+                owner_id=1,
+                subscriber_id=1,
+                membership_id=membership_id,
+                installment_id=None,
+                payment_type="membership",
+                payment_method="upi",
+                amount=1000,
+                payment_date=date(2026, 8, 1),
+                recorded_by_user_id=1,
+                status="recorded",
+            ),
+            Payout(
+                owner_id=1,
+                auction_result_id=result.id,
+                subscriber_id=1,
+                membership_id=membership_id,
+                gross_amount=100000,
+                deductions_amount=96000,
+                net_amount=4000,
+                payout_method="auction_settlement",
+                payout_date=date(2026, 8, 10),
+                status="paid",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get(f"/api/groups/{group_id}/member-summary", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()[0]["paid"] == 1000
+    assert response.json()[0]["received"] == 4000
+    assert response.json()[0]["dividend"] == 100
+    assert response.json()[0]["net"] == 3100
+
+
 def test_create_membership_generates_installments(app, db_session):
     client = TestClient(app)
     headers = _owner_headers(client)
@@ -495,10 +777,12 @@ def test_create_auction_session_for_group(app, db_session):
         },
     )
     group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
     response = client.post(
         f"/api/groups/{group_id}/auction-sessions",
         headers=headers,
-        json={"cycleNo": 1, "biddingWindowSeconds": 240},
+        json={"cycleNo": 1, "biddingWindowSeconds": 240, "allowWithPending": True},
     )
     assert response.status_code == 201
     assert response.json()["groupId"] == group_id
@@ -509,6 +793,109 @@ def test_create_auction_session_for_group(app, db_session):
     assert response.json()["maxBidValue"] == 300000
     assert response.json()["minIncrement"] == 1
     assert response.json()["status"] == "open"
+
+
+def test_create_auction_session_requires_closed_collection(app):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "AUC-CLOSED-001",
+            "title": "Auction Requires Closed Collection",
+            "chitValue": 300000,
+            "installmentAmount": 15000,
+            "memberCount": 20,
+            "cycleCount": 5,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-06-01",
+            "firstAuctionDate": "2026-06-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+
+    response = client.post(
+        f"/api/groups/{group_id}/auction-sessions",
+        headers=headers,
+        json={"cycleNo": 1, "biddingWindowSeconds": 240},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Collection must be closed before starting an auction"
+
+
+def test_create_auction_session_requires_collection_closed_lifecycle(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "AUC-LIFECYCLE-001",
+            "title": "Auction Lifecycle Guard Group",
+            "chitValue": 300000,
+            "installmentAmount": 15000,
+            "memberCount": 20,
+            "cycleCount": 5,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-06-01",
+            "firstAuctionDate": "2026-06-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
+    group = db_session.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    assert group is not None
+    group.current_month_status = "PAYOUT_DONE"
+    group.collection_closed = True
+    db_session.commit()
+
+    response = client.post(
+        f"/api/groups/{group_id}/auction-sessions",
+        headers=headers,
+        json={"cycleNo": 1, "biddingWindowSeconds": 240, "allowWithPending": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Collection must be closed before starting an auction"
+
+
+def test_create_auction_session_requires_pending_override(app):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "AUC-PENDING-001",
+            "title": "Auction Pending Override Group",
+            "chitValue": 300000,
+            "installmentAmount": 15000,
+            "memberCount": 20,
+            "cycleCount": 5,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-06-01",
+            "firstAuctionDate": "2026-06-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
+
+    response = client.post(
+        f"/api/groups/{group_id}/auction-sessions",
+        headers=headers,
+        json={"cycleNo": 1, "biddingWindowSeconds": 240},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Pending payments exist for this cycle"
 
 
 def test_create_auction_session_accepts_explicit_auction_mode(app, db_session):
@@ -531,12 +918,15 @@ def test_create_auction_session_accepts_explicit_auction_mode(app, db_session):
         },
     )
     group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
     response = client.post(
         f"/api/groups/{group_id}/auction-sessions",
         headers=headers,
         json={
             "cycleNo": 1,
             "auctionMode": "BLIND",
+            "allowWithPending": True,
             "commissionMode": "PERCENTAGE",
             "commissionValue": 5,
             "minBidValue": 1000,
@@ -581,12 +971,15 @@ def test_create_blind_auction_session_rejects_invalid_time_window(app, db_sessio
         },
     )
     group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
     response = client.post(
         f"/api/groups/{group_id}/auction-sessions",
         headers=headers,
         json={
             "cycleNo": 1,
             "auctionMode": "BLIND",
+            "allowWithPending": True,
             "biddingWindowSeconds": 240,
             "startTime": "2026-06-10T10:05:00Z",
             "endTime": "2026-06-10T10:04:00Z",
@@ -617,12 +1010,15 @@ def test_create_auction_session_rejects_invalid_commission_configuration(app, db
         },
     )
     group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
     response = client.post(
         f"/api/groups/{group_id}/auction-sessions",
         headers=headers,
         json={
             "cycleNo": 1,
             "auctionMode": "LIVE",
+            "allowWithPending": True,
             "commissionMode": "PERCENTAGE",
             "biddingWindowSeconds": 240,
         },
@@ -652,11 +1048,14 @@ def test_create_auction_session_rejects_invalid_bid_control_configuration(app, d
         },
     )
     group_id = group_response.json()["id"]
+    client.post(f"/api/groups/{group_id}/memberships", headers=headers, json={"subscriberId": 1, "memberNo": 1})
+    client.post(f"/api/groups/{group_id}/close-collection", headers=headers)
     response = client.post(
         f"/api/groups/{group_id}/auction-sessions",
         headers=headers,
         json={
             "cycleNo": 1,
+            "allowWithPending": True,
             "minBidValue": 5000,
             "maxBidValue": 4000,
             "minIncrement": 250,

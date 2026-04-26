@@ -1,57 +1,103 @@
-import { Navigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Navigate, useLocation } from "react-router-dom";
 
-import { getCurrentUser, sessionHasRole } from "./store";
+import { PageLoadingState } from "../../components/page-state";
+import { fetchCurrentUser } from "../../features/auth/api";
+import { getCurrentUser, getUserRoles, sessionHasRole, updateSession } from "./store";
 
-function getOwnerId(currentUser) {
-  return currentUser?.owner_id ?? currentUser?.ownerId ?? null;
+function hasMemberAccess(session) {
+  const roles = getUserRoles(session);
+  return roles.includes("subscriber") || roles.includes("owner");
 }
 
-function getSubscriberId(currentUser) {
-  return currentUser?.subscriber_id ?? currentUser?.subscriberId ?? null;
+function hasOwnerAccess(session) {
+  return sessionHasRole(session, "owner") || Boolean(session?.owner_id ?? session?.ownerId);
 }
 
-function hasSubscriberProfile(currentUser) {
-  return Boolean(currentUser?.has_subscriber_profile ?? currentUser?.hasSubscriberProfile);
+function hasAdminAccess(session) {
+  return sessionHasRole(session, "admin");
 }
 
-function Guard({ children, canAccess }) {
-  const currentUser = getCurrentUser();
+function RoleRoute({ children, canAccess, redirectTo = "/" }) {
+  const location = useLocation();
+  const [state, setState] = useState(() => ({
+    loading: Boolean(getCurrentUser()?.access_token),
+    session: getCurrentUser(),
+  }));
 
-  if (!currentUser?.access_token || !canAccess(currentUser)) {
-    return <Navigate replace to="/" />;
+  useEffect(() => {
+    let active = true;
+    const storedSession = getCurrentUser();
+
+    if (!storedSession?.access_token) {
+      setState({ loading: false, session: null });
+      return () => {
+        active = false;
+      };
+    }
+
+    setState({ loading: true, session: storedSession });
+    fetchCurrentUser()
+      .then((authState) => {
+        if (active) {
+          setState({ loading: false, session: updateSession(authState) });
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setState({ loading: false, session: getCurrentUser() });
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [location.pathname]);
+
+  if (state.loading) {
+    return (
+      <main className="page-shell">
+        <PageLoadingState description="Checking your account access." label="Loading workspace..." />
+      </main>
+    );
+  }
+
+  if (!state.session?.access_token || !canAccess(state.session)) {
+    return <Navigate replace state={{ from: location }} to={redirectTo} />;
   }
 
   return children;
 }
 
-export function canAccessOwnerRoutes(currentUser) {
-  return sessionHasRole(currentUser, "owner") || Boolean(getOwnerId(currentUser));
+export function MemberRoute({ children }) {
+  return <RoleRoute canAccess={hasMemberAccess}>{children}</RoleRoute>;
+}
+
+export function OwnerRoute({ children }) {
+  return <RoleRoute canAccess={hasOwnerAccess} redirectTo="/home">{children}</RoleRoute>;
+}
+
+export function AdminRoute({ children }) {
+  return <RoleRoute canAccess={hasAdminAccess} redirectTo="/home">{children}</RoleRoute>;
+}
+
+export const RequireAuthenticated = MemberRoute;
+export const RequireSubscriber = MemberRoute;
+export const RequireOwner = OwnerRoute;
+export const RequireAdmin = AdminRoute;
+
+export function canAccessAuthenticatedRoutes(currentUser) {
+  return hasMemberAccess(currentUser);
 }
 
 export function canAccessSubscriberRoutes(currentUser) {
-  return sessionHasRole(currentUser, "subscriber") || Boolean(getSubscriberId(currentUser)) || hasSubscriberProfile(currentUser);
+  return hasMemberAccess(currentUser);
 }
 
-export function canAccessAuthenticatedRoutes(currentUser) {
-  return Boolean(currentUser?.access_token);
+export function canAccessOwnerRoutes(currentUser) {
+  return hasOwnerAccess(currentUser);
 }
 
 export function canAccessAdminRoutes(currentUser) {
-  return sessionHasRole(currentUser, "admin");
-}
-
-export function RequireOwner({ children }) {
-  return <Guard canAccess={canAccessOwnerRoutes}>{children}</Guard>;
-}
-
-export function RequireSubscriber({ children }) {
-  return <Guard canAccess={canAccessSubscriberRoutes}>{children}</Guard>;
-}
-
-export function RequireAuthenticated({ children }) {
-  return <Guard canAccess={canAccessAuthenticatedRoutes}>{children}</Guard>;
-}
-
-export function RequireAdmin({ children }) {
-  return <Guard canAccess={canAccessAdminRoutes}>{children}</Guard>;
+  return hasAdminAccess(currentUser);
 }

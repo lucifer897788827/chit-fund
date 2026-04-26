@@ -6,7 +6,9 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI
-from fastapi import Request
+from fastapi import HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -16,6 +18,7 @@ from app.core.bootstrap import assert_startup_configuration_safe, bootstrap_data
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.rate_limiter import RateLimitMiddleware
+from app.core.startup_warmup import run_startup_warmup
 from app.core.websocket import connection_manager
 from app.modules.admin.router import router as admin_router
 from app.modules.auctions.router import router as auctions_router
@@ -33,10 +36,12 @@ from app.modules.groups.router import router as groups_router
 from app.modules.job_tracking.router import router as job_tracking_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.owner_requests.router import router as owner_requests_router
+from app.modules.payments.payout_router import router as payout_router
 from app.modules.payments.router import router as payments_router
 from app.modules.reporting.router import router as reporting_router
 from app.modules.subscribers.router import router as subscribers_router
 from app.modules.support.router import router as support_router
+from app.modules.users.router import router as users_router
 
 
 app_logger = configure_logging(
@@ -50,6 +55,44 @@ _REQUEST_METRICS = {
     "errors_total": 0,
     "duration_ms_total": 0.0,
 }
+
+
+def _first_error_message(detail: Any, fallback: str) -> str:
+    if isinstance(detail, str) and detail.strip():
+        return detail
+    if isinstance(detail, list):
+        for item in detail:
+            if isinstance(item, dict):
+                message = item.get("msg")
+                if isinstance(message, str) and message.strip():
+                    return message
+            if isinstance(item, str) and item.strip():
+                return item
+    if isinstance(detail, dict):
+        for key in ("error", "message", "detail"):
+            value = detail.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return fallback
+
+
+def _build_error_response(
+    *,
+    status_code: int,
+    error_message: str,
+    detail: Any,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    payload = {
+        "success": False,
+        "error": error_message,
+        "detail": detail,
+    }
+    return JSONResponse(
+        content=jsonable_encoder(payload),
+        status_code=status_code,
+        headers=headers,
+    )
 
 
 async def _relay_auction_realtime_events(stop_event: asyncio.Event):
@@ -79,6 +122,7 @@ async def _relay_auction_realtime_events(stop_event: asyncio.Event):
 async def lifespan(_app: FastAPI):
     assert_startup_configuration_safe()
     bootstrap_database()
+    run_startup_warmup()
     stop_event = asyncio.Event()
     realtime_task = asyncio.create_task(_relay_auction_realtime_events(stop_event))
     app_logger.info(
@@ -125,9 +169,44 @@ def create_app() -> FastAPI:
     application.include_router(notifications_router)
     application.include_router(auctions_router)
     application.include_router(auctions_realtime_router)
+    application.include_router(payout_router)
     application.include_router(payments_router)
     application.include_router(reporting_router)
     application.include_router(external_chits_router)
+    application.include_router(users_router)
+
+    @application.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exc: HTTPException):
+        return _build_error_response(
+            status_code=exc.status_code,
+            error_message=_first_error_message(exc.detail, "Request failed."),
+            detail=exc.detail,
+            headers=exc.headers,
+        )
+
+    @application.exception_handler(RequestValidationError)
+    async def request_validation_exception_handler(_request: Request, exc: RequestValidationError):
+        detail = exc.errors()
+        return _build_error_response(
+            status_code=422,
+            error_message=_first_error_message(detail, "Request validation failed."),
+            detail=detail,
+        )
+
+    @application.exception_handler(Exception)
+    async def unhandled_exception_handler(_request: Request, exc: Exception):
+        app_logger.exception(
+            "http.request.unhandled_exception",
+            extra={
+                "event": "http.request.unhandled_exception",
+            },
+        )
+        detail = str(exc) if settings.is_dev_profile else "Internal server error"
+        return _build_error_response(
+            status_code=500,
+            error_message="Internal server error",
+            detail=detail,
+        )
 
     @application.middleware("http")
     async def request_logging_middleware(request: Request, call_next):
@@ -223,6 +302,8 @@ def create_app() -> FastAPI:
                 },
             )
             payload = {
+                "success": False,
+                "error": "Database is unreachable",
                 "status": "error",
                 "database": "unreachable",
             }

@@ -12,12 +12,13 @@ from app.core.money import money_int
 from app.core.pagination import PaginatedResponse, apply_pagination, build_paginated_response, count_statement, resolve_pagination
 from app.core.security import CurrentUser, require_owner
 from app.core.time import utcnow
-from app.models.auction import AuctionResult
-from app.models.chit import ChitGroup, GroupMembership
+from app.models.auction import AuctionResult, AuctionSession
+from app.models.chit import ChitGroup, CurrentMonthStatus, GroupMembership
 from app.models.money import LedgerEntry, Payout
 from app.models.user import Owner, Subscriber
 from app.modules.notifications.service import (
     dispatch_staged_notifications,
+    notify_auction_finalized,
     notify_payout_created,
     notify_payout_settled,
 )
@@ -129,24 +130,13 @@ def _load_existing_payout_and_ledger(db: Session, *, result_id: int) -> tuple[Pa
     return payout, ledger_entry
 
 
-def ensure_auction_payout(
+def _ensure_payout_record(
     db: Session,
     *,
     result: AuctionResult,
-    group: ChitGroup | None = None,
-    membership: GroupMembership | None = None,
-    subscriber: Subscriber | None = None,
-    membership_payables: tuple[MembershipPayableBreakdown, ...] | None = None,
-) -> tuple[Payout, LedgerEntry]:
-    group = group or db.get(ChitGroup, result.group_id)
-    if group is None:
-        raise ValueError("Chit group not found for payout creation")
-
-    membership = membership or db.get(GroupMembership, result.winner_membership_id)
-    if membership is None:
-        raise ValueError("Winner membership not found for payout creation")
-    subscriber = subscriber or db.get(Subscriber, membership.subscriber_id)
-
+    group: ChitGroup,
+    membership: GroupMembership,
+) -> tuple[Payout, bool]:
     payout = db.scalar(select(Payout).where(Payout.auction_result_id == result.id))
     payout_date = (result.finalized_at or utcnow()).date()
     gross_amount = money_int(group.chit_value)
@@ -158,95 +148,187 @@ def ensure_auction_payout(
         if is_settled_payout_status(normalized_status):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Payout already settled",
+                detail="Payout already paid",
             )
         if payout.owner_id != group.owner_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Cannot settle another owner's payout",
             )
+        payout.owner_id = group.owner_id
+        payout.subscriber_id = membership.subscriber_id
+        payout.membership_id = membership.id
+        payout.gross_amount = gross_amount
+        payout.deductions_amount = deductions_amount
+        payout.net_amount = net_amount
+        payout.payout_method = "auction_settlement"
+        payout.payout_date = payout.payout_date or payout_date
+        payout.status = normalized_status
+        return payout, False
+
+    payout = Payout(
+        owner_id=group.owner_id,
+        auction_result_id=result.id,
+        subscriber_id=membership.subscriber_id,
+        membership_id=membership.id,
+        gross_amount=gross_amount,
+        deductions_amount=deductions_amount,
+        net_amount=net_amount,
+        payout_method="auction_settlement",
+        payout_date=payout_date,
+        status=normalize_payout_status(None),
+        payout_expanded=True,
+    )
+    db.add(payout)
+    db.flush()
+    return payout, True
+
+
+def expand_auction_payout_derivatives(
+    db: Session,
+    *,
+    payout_id: int,
+    membership_payables: tuple[MembershipPayableBreakdown, ...] | None = None,
+    emit_notifications: bool = True,
+    emit_finalize_notification: bool = False,
+) -> tuple[Payout, LedgerEntry | None]:
+    payout = db.get(Payout, payout_id)
+    if payout is None:
+        raise ValueError("Payout not found for derivative expansion")
+
+    result = db.get(AuctionResult, payout.auction_result_id)
+    if result is None:
+        raise ValueError("Auction result not found for payout derivative expansion")
+
+    group = db.get(ChitGroup, result.group_id)
+    if group is None:
+        raise ValueError("Chit group not found for payout derivative expansion")
+
+    membership = db.get(GroupMembership, payout.membership_id)
+    if membership is None:
+        raise ValueError("Membership not found for payout derivative expansion")
+
+    subscriber = db.get(Subscriber, payout.subscriber_id)
+    session = db.get(AuctionSession, result.auction_session_id)
+    ledger_entry = db.scalar(
+        select(LedgerEntry).where(
+            LedgerEntry.source_table == "payouts",
+            LedgerEntry.source_id == payout.id,
+        )
+    )
+    if payout.payout_expanded and ledger_entry is not None:
+        return payout, ledger_entry
+
+    resolved_membership_payables = membership_payables or build_membership_payables_from_result(
+        db,
+        result=result,
+        group=group,
+    )
+    apply_membership_payables_for_cycle(
+        db,
+        group=group,
+        cycle_no=result.cycle_no,
+        membership_payables=resolved_membership_payables,
+    )
+
+    ledger_entry = _upsert_payout_ledger_entry(
+        db,
+        payout,
+        result,
+        membership=membership,
+        subscriber=subscriber,
+        group=group,
+    )
+    payout.payout_expanded = True
+    payout.updated_at = utcnow()
+    if emit_notifications:
+        notify_payout_created(db, payout=payout, owner=db.get(Owner, group.owner_id), subscriber=subscriber)
+    if emit_finalize_notification and session is not None:
+        notify_auction_finalized(
+            db,
+            session=session,
+            result=result,
+            group=group,
+            owner=db.get(Owner, group.owner_id),
+            winner_membership=membership,
+            winner_subscriber=subscriber,
+        )
+    return payout, ledger_entry
+
+
+def ensure_auction_payout(
+    db: Session,
+    *,
+    result: AuctionResult,
+    group: ChitGroup | None = None,
+    membership: GroupMembership | None = None,
+    subscriber: Subscriber | None = None,
+    membership_payables: tuple[MembershipPayableBreakdown, ...] | None = None,
+    expand_derivatives: bool = True,
+) -> tuple[Payout, LedgerEntry | None]:
+    group = group or db.get(ChitGroup, result.group_id)
+    if group is None:
+        raise ValueError("Chit group not found for payout creation")
+
+    membership = membership or db.get(GroupMembership, result.winner_membership_id)
+    if membership is None:
+        raise ValueError("Winner membership not found for payout creation")
+    subscriber = subscriber or db.get(Subscriber, membership.subscriber_id)
 
     try:
-        payout_created = payout is None
-        if payout is None:
-            payout = Payout(
-                owner_id=group.owner_id,
-                auction_result_id=result.id,
-                subscriber_id=membership.subscriber_id,
-                membership_id=membership.id,
-                gross_amount=gross_amount,
-                deductions_amount=deductions_amount,
-                net_amount=net_amount,
-                payout_method="auction_settlement",
-                payout_date=payout_date,
-                status=normalize_payout_status(None),
-            )
-            db.add(payout)
-            db.flush()
-        else:
-            payout.owner_id = group.owner_id
-            payout.subscriber_id = membership.subscriber_id
-            payout.membership_id = membership.id
-            payout.gross_amount = gross_amount
-            payout.deductions_amount = deductions_amount
-            payout.net_amount = net_amount
-            payout.payout_method = "auction_settlement"
-            payout.payout_date = payout.payout_date or payout_date
-            payout.status = normalized_status
-
-        resolved_membership_payables = membership_payables or build_membership_payables_from_result(
+        payout, payout_created = _ensure_payout_record(
             db,
             result=result,
             group=group,
-        )
-        apply_membership_payables_for_cycle(
-            db,
-            group=group,
-            cycle_no=result.cycle_no,
-            membership_payables=resolved_membership_payables,
-        )
-
-        ledger_entry = _upsert_payout_ledger_entry(
-            db,
-            payout,
-            result,
             membership=membership,
-            subscriber=subscriber,
-            group=group,
         )
+        ledger_entry = None
+        if expand_derivatives:
+            payout.payout_expanded = True
+            ledger_entry = expand_auction_payout_derivatives(
+                db,
+                payout_id=payout.id,
+                membership_payables=membership_payables,
+                emit_notifications=False,
+            )[1]
+            notify_payout_created(db, payout=payout, owner=db.get(Owner, group.owner_id), subscriber=subscriber)
+        else:
+            payout.payout_expanded = False
+            payout.updated_at = utcnow()
     except IntegrityError:
         db.rollback()
         recovered_payout = db.scalar(select(Payout).where(Payout.auction_result_id == result.id))
         if recovered_payout is not None:
-            recovered_ledger = _upsert_payout_ledger_entry(
-                db,
-                recovered_payout,
-                result,
-                membership=membership,
-                subscriber=subscriber,
-                group=group,
-            )
+            recovered_ledger = None
+            if expand_derivatives:
+                recovered_ledger = expand_auction_payout_derivatives(
+                    db,
+                    payout_id=recovered_payout.id,
+                    membership_payables=membership_payables,
+                    emit_notifications=False,
+                )[1]
+                notify_payout_created(db, payout=recovered_payout, owner=db.get(Owner, group.owner_id), subscriber=subscriber)
             logger.warning(
                 "Auction payout recovered after integrity conflict",
                 extra={
                     "event": "payout.reused",
                     "auction_result_id": result.id,
                     "payout_id": recovered_payout.id,
-                    "ledger_entry_id": recovered_ledger.id,
+                    "ledger_entry_id": recovered_ledger.id if recovered_ledger is not None else None,
                 },
             )
             return recovered_payout, recovered_ledger
         raise
 
-    notify_payout_created(db, payout=payout, owner=db.get(Owner, group.owner_id), subscriber=subscriber)
     logger.info(
         "Auction payout ensured",
         extra={
             "event": "payout.created" if payout_created else "payout.updated",
             "auction_result_id": result.id,
             "payout_id": payout.id,
-            "ledger_entry_id": ledger_entry.id,
+            "ledger_entry_id": ledger_entry.id if ledger_entry is not None else None,
             "subscriber_id": payout.subscriber_id,
+            "payout_expanded": bool(payout.payout_expanded),
         },
     )
     return payout, ledger_entry
@@ -282,7 +364,8 @@ def _serialize_payout(
         "payoutMethod": payout.payout_method,
         "payoutDate": payout.payout_date,
         "referenceNo": payout.reference_no,
-        "status": payout.status,
+        "status": normalize_payout_status(payout.status),
+        "paidAt": payout.paid_at,
         "createdAt": payout.created_at,
         "updatedAt": payout.updated_at,
     }
@@ -379,9 +462,10 @@ def settle_owner_payout(
     }
     payout.status = normalized_status
     if is_settled_payout_status(payout.status):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Payout already settled")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Payout already paid")
 
-    payout.status = "settled"
+    payout.status = "paid"
+    payout.paid_at = payout.paid_at or utcnow()
     if payout_method is not None:
         payout.payout_method = payout_method
     payout.payout_date = payout_date or payout.payout_date or utcnow().date()
@@ -391,6 +475,10 @@ def settle_owner_payout(
     payout_result = db.get(AuctionResult, payout.auction_result_id)
     if payout_result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Auction result not found")
+    group = db.get(ChitGroup, payout_result.group_id)
+    if group is not None:
+        group.current_month_status = CurrentMonthStatus.PAYOUT_DONE.value
+        group.updated_at = utcnow()
     ledger_entry = _upsert_payout_ledger_entry(db, payout, payout_result)
     notify_payout_settled(db, payout=payout)
     log_audit_event(
@@ -408,7 +496,7 @@ def settle_owner_payout(
             "payoutId": payout.id,
             "payoutMethod": payout.payout_method,
             "referenceNo": payout.reference_no,
-            "status": payout.status,
+            "status": normalize_payout_status(payout.status),
             "subscriberId": payout.subscriber_id,
             "deductionsAmount": money_int(payout.deductions_amount),
             "grossAmount": money_int(payout.gross_amount),
@@ -417,7 +505,7 @@ def settle_owner_payout(
         },
         before=audit_before,
         after={
-            "status": payout.status,
+            "status": normalize_payout_status(payout.status),
             "payoutMethod": payout.payout_method,
             "payoutDate": payout.payout_date,
             "referenceNo": payout.reference_no,
@@ -438,7 +526,7 @@ def settle_owner_payout(
             },
         )
     logger.info(
-        "Payout settled",
+        "Payout paid",
         extra={
             "event": "payout.settled",
             "payout_id": payout.id,
@@ -448,3 +536,17 @@ def settle_owner_payout(
     )
     dues_snapshot = build_membership_dues_snapshot_map(db, [payout.membership_id]).get(payout.membership_id)
     return _serialize_payout(db, payout, dues_snapshot=dues_snapshot)
+
+
+def mark_owner_payout_paid(db: Session, payout_id: int, current_user: CurrentUser) -> dict:
+    settled = settle_owner_payout(db, payout_id, current_user)
+    payout = db.get(Payout, payout_id)
+    if payout is not None and normalize_payout_status(payout.status) == "paid":
+        payout.status = "paid"
+        payout.paid_at = payout.paid_at or utcnow()
+        payout.updated_at = utcnow()
+        db.commit()
+        db.refresh(payout)
+        dues_snapshot = build_membership_dues_snapshot_map(db, [payout.membership_id]).get(payout.membership_id)
+        return _serialize_payout(db, payout, dues_snapshot=dues_snapshot)
+    return settled

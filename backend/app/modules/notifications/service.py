@@ -64,29 +64,10 @@ def dispatch_staged_notifications(db: Session) -> None:
     staged = db.info.pop(_NOTIFICATION_DISPATCH_KEY, [])
     if not staged:
         return
-
-    try:
-        from app.core.celery_app import celery_app
-    except ModuleNotFoundError:
-        return
-
-    # Keep request/response paths broker-independent in production.
-    # Pending notifications stay persisted and can be delivered by the background sweep.
-    if not bool(getattr(celery_app.conf, "task_always_eager", False)):
-        return
-
-    try:
-        from app.tasks.notification_tasks import queue_notification_delivery
-    except ModuleNotFoundError:
-        return
-
-    for notification in staged:
-        if notification.channel == "in_app":
-            continue
-        try:
-            queue_notification_delivery.delay(notification.id)
-        except Exception:
-            continue
+    # Request paths only need to persist notifications. Delivery can be picked up by the
+    # background notification sweep, which keeps finalize and payout actions from doing
+    # extra synchronous work while the response is still open.
+    return
 
 
 def _current_owner_id(current_user: CurrentUser) -> int | None:

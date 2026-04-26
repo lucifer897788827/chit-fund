@@ -295,6 +295,7 @@ def test_create_auction_result_advances_group_to_next_cycle_when_more_cycles_rem
     assert group.current_cycle_no == 2
     assert group.bidding_enabled is True
     assert group.status == "active"
+    assert group.current_month_status == "AUCTION_DONE"
 
 
 def test_create_auction_result_marks_group_completed_on_final_cycle(app, db_session):
@@ -324,6 +325,7 @@ def test_create_auction_result_marks_group_completed_on_final_cycle(app, db_sess
     assert group.current_cycle_no == 1
     assert group.bidding_enabled is False
     assert group.status == "completed"
+    assert group.current_month_status == "AUCTION_DONE"
 
 
 def test_create_auction_result_applies_percentage_commission(app, db_session):

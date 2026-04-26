@@ -136,7 +136,7 @@ def test_settle_owner_payout_updates_ledger_entry_in_place(app, db_session):
     )
 
     assert serialized["id"] == payout.id
-    assert serialized["status"] == "settled"
+    assert serialized["status"] == "paid"
     assert serialized["referenceNo"] == "SETTLE-001"
 
     persisted = db_session.scalar(select(LedgerEntry).where(LedgerEntry.id == stale_entry.id))
@@ -150,7 +150,7 @@ def test_settle_owner_payout_updates_ledger_entry_in_place(app, db_session):
 
     updated_payout = db_session.get(Payout, payout.id)
     assert updated_payout is not None
-    assert updated_payout.status == "settled"
+    assert updated_payout.status == "paid"
     assert updated_payout.reference_no == "SETTLE-001"
 
 

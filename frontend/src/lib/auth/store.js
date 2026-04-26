@@ -167,13 +167,13 @@ export function sessionHasRole(session, role) {
 
 export function getDashboardPath(session = readSession()) {
   if (sessionHasRole(session, "admin")) {
-    return "/admin/owner-requests";
+    return "/admin";
   }
   if (sessionHasRole(session, "owner")) {
-    return "/owner";
+    return "/home";
   }
   if (sessionHasRole(session, "subscriber")) {
-    return "/subscriber";
+    return "/home";
   }
   return "/";
 }

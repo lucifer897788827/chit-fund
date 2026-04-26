@@ -16,23 +16,21 @@ def test_db_test_endpoint_reports_connected_database(app):
 
 
 def test_db_test_endpoint_returns_503_when_database_is_unreachable(app, monkeypatch):
-    class _BrokenConnection:
+    class _BrokenSession:
         def __enter__(self):
             raise RuntimeError("db down")
 
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    class _BrokenEngine:
-        def connect(self):
-            return _BrokenConnection()
-
-    monkeypatch.setattr(database, "engine", _BrokenEngine())
+    monkeypatch.setattr(database, "SessionLocal", lambda: _BrokenSession())
     client = TestClient(app)
 
     response = client.get("/api/db-test")
 
     assert response.status_code == 503
+    assert response.json()["success"] is False
+    assert response.json()["error"] == "Database is unreachable"
     assert response.json()["status"] == "error"
     assert response.json()["database"] == "unreachable"
 

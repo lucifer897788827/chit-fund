@@ -67,6 +67,21 @@ export async function createGroup(payload) {
   return data;
 }
 
+export async function fetchGroupStatus(groupId) {
+  const { data } = await apiClient.get(`/groups/${groupId}/status`);
+  return data;
+}
+
+export async function fetchGroupMemberSummary(groupId) {
+  const { data } = await apiClient.get(`/groups/${groupId}/member-summary`);
+  return Array.isArray(data) ? data : [];
+}
+
+export async function closeGroupCollection(groupId) {
+  const { data } = await apiClient.post(`/groups/${groupId}/close-collection`);
+  return data;
+}
+
 export async function createAuctionSession(groupId, payload) {
   const { data } = await apiClient.post(`/groups/${groupId}/auction-sessions`, payload);
   return data;

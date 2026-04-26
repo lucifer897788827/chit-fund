@@ -81,6 +81,7 @@ class PayoutResponse(BaseModel):
     payoutDate: date | None = None
     referenceNo: str | None = None
     status: str
+    paidAt: datetime | None = None
     paymentStatus: str | None = None
     penaltyAmount: int | None = None
     arrearsAmount: int | None = None

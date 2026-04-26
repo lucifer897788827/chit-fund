@@ -559,8 +559,9 @@ function extractResultFromResponse(response) {
   return null;
 }
 
-export default function AuctionRoomPage() {
-  const { sessionId = "1" } = useParams();
+export default function AuctionRoomPage({ embedded = false, sessionId: sessionIdProp } = {}) {
+  const { sessionId: routeSessionId = "1" } = useParams();
+  const sessionId = sessionIdProp ?? routeSessionId;
   const [room, setRoom] = useState(createInitialRoomState());
   const [bidAmount, setBidAmount] = useState("");
   const [feedback, setFeedback] = useState({ type: "", text: "" });
@@ -1060,8 +1061,8 @@ export default function AuctionRoomPage() {
     contextLabel: shellContextLabel,
   });
 
-  return (
-    <main className="page-shell auction-room">
+  const content = (
+    <main className={embedded ? "auction-room" : "page-shell auction-room"}>
       {loading ? (
         <section className="panel">
           <p>Loading...</p>
@@ -1337,4 +1338,6 @@ export default function AuctionRoomPage() {
       ) : null}
     </main>
   );
+
+  return content;
 }

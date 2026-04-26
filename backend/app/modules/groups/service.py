@@ -3,7 +3,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.audit import log_audit_event
@@ -11,12 +11,19 @@ from app.core.money import money_int
 from app.core.pagination import PaginatedResponse, apply_pagination, build_paginated_response, count_statement, resolve_pagination
 from app.core.security import CurrentUser, require_owner
 from app.core.time import utcnow
-from app.models.auction import AuctionSession
-from app.models.chit import ChitGroup, GroupMembership, Installment
+from app.models.auction import AuctionResult, AuctionSession
+from app.models.chit import ChitGroup, CurrentMonthStatus, GroupMembership, Installment, MembershipSlot
+from app.models.money import Payment, Payout
+from app.models.user import Subscriber
 from app.modules.auctions.service import validate_session_bid_controls
 from app.modules.auctions.commission_service import validate_commission_config
 from app.modules.groups.membership_validation import validate_membership_creation
-from app.modules.groups.slot_service import create_membership_slots, ensure_membership_slot, sync_membership_slot_state
+from app.modules.groups.slot_service import (
+    create_membership_slots,
+    ensure_membership_slot,
+    get_membership_bid_eligibility,
+    sync_membership_slot_state,
+)
 
 
 def validate_group_penalty_config(
@@ -127,6 +134,8 @@ def serialize_group(group: ChitGroup) -> dict:
         "gracePeriodDays": group.grace_period_days,
         "currentCycleNo": group.current_cycle_no,
         "biddingEnabled": group.bidding_enabled,
+        "collectionClosed": bool(group.collection_closed),
+        "currentMonthStatus": group.current_month_status or CurrentMonthStatus.OPEN.value,
         "status": group.status,
     }
 
@@ -157,6 +166,8 @@ def create_group(db: Session, payload, current_user: CurrentUser):
         first_auction_date=payload.firstAuctionDate,
         current_cycle_no=1,
         bidding_enabled=True,
+        collection_closed=False,
+        current_month_status=CurrentMonthStatus.OPEN.value,
         penalty_enabled=penalty_config["penaltyEnabled"],
         penalty_type=penalty_config["penaltyType"],
         penalty_value=penalty_config["penaltyValue"],
@@ -219,6 +230,149 @@ def list_groups(
     )
 
 
+def close_group_collection(db: Session, group_id: int, current_user: CurrentUser) -> dict:
+    owner = require_owner(current_user)
+    group = db.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    if group is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    if group.owner_id != owner.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another owner's group")
+    if group.collection_closed or group.current_month_status != CurrentMonthStatus.OPEN.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Collection is already closed")
+
+    group.collection_closed = True
+    group.current_month_status = CurrentMonthStatus.COLLECTION_CLOSED.value
+    group.updated_at = utcnow()
+    log_audit_event(
+        db,
+        action="group.collection_closed",
+        entity_type="chit_group",
+        entity_id=group.id,
+        current_user=current_user,
+        metadata={"groupId": group.id, "currentCycleNo": group.current_cycle_no},
+        after={
+            "collectionClosed": group.collection_closed,
+            "currentMonthStatus": group.current_month_status,
+        },
+    )
+    db.commit()
+    db.refresh(group)
+    return serialize_group(group)
+
+
+def get_group_status(db: Session, group_id: int, current_user: CurrentUser) -> dict:
+    group = db.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    if group is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+
+    has_owner_access = current_user.owner is not None and group.owner_id == current_user.owner.id
+    has_member_access = False
+    if current_user.subscriber is not None:
+        has_member_access = (
+            db.scalar(
+                select(GroupMembership.id).where(
+                    GroupMembership.group_id == group.id,
+                    GroupMembership.subscriber_id == current_user.subscriber.id,
+                )
+            )
+            is not None
+        )
+    if not has_owner_access and not has_member_access:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Group access required")
+
+    active_membership_ids = db.scalars(
+        select(GroupMembership.id).where(
+            GroupMembership.group_id == group.id,
+            GroupMembership.membership_status == "active",
+        )
+    ).all()
+    total_members = len(active_membership_ids) or int(group.member_count or 0)
+    paid_members = 0
+    if active_membership_ids:
+        paid_members = db.scalar(
+            select(func.count(Installment.id)).where(
+                Installment.group_id == group.id,
+                Installment.cycle_no == group.current_cycle_no,
+                Installment.membership_id.in_(active_membership_ids),
+                ((Installment.status == "paid") | (Installment.balance_amount <= 0)),
+            )
+        ) or 0
+
+    return {
+        "collection_closed": bool(group.collection_closed),
+        "status": group.current_month_status or CurrentMonthStatus.OPEN.value,
+        "paid_members": int(paid_members),
+        "total_members": int(total_members),
+    }
+
+
+def _ensure_group_access(db: Session, group: ChitGroup, current_user: CurrentUser) -> None:
+    has_owner_access = current_user.owner is not None and group.owner_id == current_user.owner.id
+    has_member_access = False
+    if current_user.subscriber is not None:
+        has_member_access = (
+            db.scalar(
+                select(GroupMembership.id).where(
+                    GroupMembership.group_id == group.id,
+                    GroupMembership.subscriber_id == current_user.subscriber.id,
+                )
+            )
+            is not None
+        )
+    if not has_owner_access and not has_member_access:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Group access required")
+
+
+def get_group_member_summary(db: Session, group_id: int, current_user: CurrentUser) -> list[dict]:
+    group = db.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    if group is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    _ensure_group_access(db, group, current_user)
+
+    memberships = db.scalars(
+        select(GroupMembership)
+        .where(GroupMembership.group_id == group.id)
+        .order_by(GroupMembership.member_no.asc(), GroupMembership.id.asc())
+    ).all()
+    group_dividend = db.scalar(
+        select(func.coalesce(func.sum(AuctionResult.dividend_per_member_amount), 0)).where(
+            AuctionResult.group_id == group.id
+        )
+    ) or 0
+    rows: list[dict] = []
+    for membership in memberships:
+        subscriber = db.get(Subscriber, membership.subscriber_id)
+        paid = db.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.membership_id == membership.id)
+        ) or 0
+        received = db.scalar(
+            select(func.coalesce(func.sum(Payout.net_amount), 0)).where(Payout.membership_id == membership.id)
+        ) or 0
+        subscriber_user_id = subscriber.user_id if subscriber is not None else -1
+        slot_count = db.scalar(
+            select(func.count(MembershipSlot.id)).where(
+                MembershipSlot.group_id == group.id,
+                MembershipSlot.user_id == subscriber_user_id,
+            )
+        ) or 0
+        dividend = money_int(group_dividend) * max(int(slot_count), 1)
+        paid_value = money_int(paid)
+        received_value = money_int(received)
+        rows.append(
+            {
+                "membershipId": membership.id,
+                "subscriberId": membership.subscriber_id,
+                "memberNo": membership.member_no,
+                "memberName": subscriber.full_name if subscriber is not None else None,
+                "paid": paid_value,
+                "received": received_value,
+                "dividend": dividend,
+                "net": received_value + dividend - paid_value,
+            }
+        )
+    return rows
+
+
 def _add_months(base_date: date, months_to_add: int) -> date:
     month_index = base_date.month - 1 + months_to_add
     year = base_date.year + month_index // 12
@@ -246,6 +400,53 @@ def _normalize_datetime(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _count_pending_members_for_current_cycle(db: Session, group: ChitGroup) -> int:
+    active_membership_ids = db.scalars(
+        select(GroupMembership.id).where(
+            GroupMembership.group_id == group.id,
+            GroupMembership.membership_status == "active",
+        )
+    ).all()
+    if not active_membership_ids:
+        return 0
+    paid_count = db.scalar(
+        select(func.count(Installment.id)).where(
+            Installment.group_id == group.id,
+            Installment.cycle_no == group.current_cycle_no,
+            Installment.membership_id.in_(active_membership_ids),
+            ((Installment.status == "paid") | (Installment.balance_amount <= 0)),
+        )
+    ) or 0
+    return max(len(active_membership_ids) - int(paid_count), 0)
+
+
+def _ensure_auction_eligibility(db: Session, group: ChitGroup, payload) -> None:
+    if not group.collection_closed or group.current_month_status != CurrentMonthStatus.COLLECTION_CLOSED.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Collection must be closed before starting an auction",
+        )
+
+    pending_members = _count_pending_members_for_current_cycle(db, group)
+    if pending_members > 0 and not bool(getattr(payload, "allowWithPending", False)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Pending payments exist for this cycle",
+        )
+
+    memberships = db.scalars(
+        select(GroupMembership).where(
+            GroupMembership.group_id == group.id,
+            GroupMembership.membership_status == "active",
+        )
+    ).all()
+    if not any(get_membership_bid_eligibility(db, membership) for membership in memberships):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No eligible member slots are available for auction",
+        )
 
 
 def _membership_cycle_due_amount(group: ChitGroup, *, slot_count: int) -> int:
@@ -430,6 +631,7 @@ def create_auction_session(db: Session, group_id: int, payload, current_user: Cu
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
     if group.owner_id != owner.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another owner's group")
+    _ensure_auction_eligibility(db, group, payload)
 
     scheduled_start = datetime.combine(
         group.first_auction_date,

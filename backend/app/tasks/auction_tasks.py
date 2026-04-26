@@ -19,6 +19,7 @@ from app.modules.auctions.service import (
     process_pending_finalize_jobs as process_pending_finalize_jobs_from_db,
     reconcile_incomplete_auctions,
 )
+from app.modules.payments.payout_service import expand_auction_payout_derivatives
 from app.modules.support.service import complete_job_run, fail_job_run, start_job_run
 from app.tasks.system_tasks import celery_app as system_celery_app
 from app.tasks.system_tasks import celery_system_task
@@ -189,6 +190,121 @@ else:
 
 
 queue_finalize_post_processing = finalize_post_processing
+
+
+def _execute_expand_payout_derivatives_task(payout_id: int) -> dict[str, Any]:
+    task_id = _current_task_id()
+    started_at = perf_counter()
+    metadata = {"payout_id": int(payout_id)}
+    try:
+        with database.SessionLocal() as tracking_db:
+            job_run = start_job_run(
+                tracking_db,
+                task_name="auctions.expand_payout_derivatives",
+                task_id=task_id,
+                summary=metadata,
+            )
+    except Exception:
+        job_run = _FallbackJobRun()
+
+    log_job_event(
+        logger,
+        event="job.start",
+        job_name="auctions.expand_payout_derivatives",
+        status="started",
+        task_id=task_id,
+        metadata=metadata,
+    )
+    db = get_db_session()
+    try:
+        payout, ledger_entry = expand_auction_payout_derivatives(
+            db,
+            payout_id=int(payout_id),
+            emit_finalize_notification=True,
+        )
+        db.commit()
+        result = {
+            "status": "completed",
+            "payoutId": int(payout.id),
+            "ledgerEntryId": int(ledger_entry.id) if ledger_entry is not None else None,
+            "payoutExpanded": bool(payout.payout_expanded),
+        }
+    except Exception:
+        db.rollback()
+        log_job_event(
+            logger,
+            event="job.failure",
+            job_name="auctions.expand_payout_derivatives",
+            status="failed",
+            task_id=task_id,
+            duration_ms=(perf_counter() - started_at) * 1000,
+            metadata=metadata,
+            level=logging.ERROR,
+            exc_info=True,
+        )
+        _update_job_run(job_run.id, summary=metadata | {"error": "expand_payout_derivatives_failed"}, failed=True)
+        raise
+    finally:
+        db.close()
+
+    log_job_event(
+        logger,
+        event="job.success",
+        job_name="auctions.expand_payout_derivatives",
+        status="success",
+        task_id=task_id,
+        duration_ms=(perf_counter() - started_at) * 1000,
+        metadata=metadata | result,
+    )
+    _update_job_run(job_run.id, summary=metadata | result)
+    return result
+
+
+if system_celery_app is not None:
+
+    @system_celery_app.task(
+        name="auctions.expand_payout_derivatives",
+        bind=True,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_kwargs={"max_retries": 5},
+    )
+    def expand_payout_derivatives(self, payout_id: int) -> dict[str, Any]:
+        return _execute_expand_payout_derivatives_task(payout_id)
+
+else:
+
+    class _ExpandPayoutDerivativesTask:
+        name = "auctions.expand_payout_derivatives"
+        request = SimpleNamespace(retries=0)
+
+        def __call__(self, payout_id: int) -> dict[str, Any]:
+            return _execute_expand_payout_derivatives_task(payout_id)
+
+        def delay(self, payout_id: int) -> dict[str, Any]:
+            if "pytest" in sys.modules:
+                return _execute_expand_payout_derivatives_task(int(payout_id))
+            thread = Thread(
+                target=_execute_expand_payout_derivatives_task,
+                args=(int(payout_id),),
+                daemon=True,
+            )
+            thread.start()
+            return {"status": "queued", "payoutId": int(payout_id)}
+
+        def apply_async(
+            self,
+            args: tuple[Any, ...] | None = None,
+            kwargs: dict[str, Any] | None = None,
+            **_ignored: Any,
+        ) -> dict[str, Any]:
+            payout_id = int((args or ())[0] if args else (kwargs or {}).get("payout_id"))
+            return self.delay(payout_id)
+
+    expand_payout_derivatives = _ExpandPayoutDerivativesTask()
+
+
+queue_expand_payout_derivatives = expand_payout_derivatives
 
 
 def _run_pending_finalize_recovery_scan(

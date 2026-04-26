@@ -12,20 +12,20 @@ from app.models.user import Owner, Subscriber
 from app.modules.payments.installment_service import build_installment_financial_snapshot
 
 PAYOUT_STATUS_PENDING = "pending"
-PAYOUT_STATUS_SETTLED = "settled"
+PAYOUT_STATUS_PAID = "paid"
 PAYOUT_STATUS_ALIASES = {
     "created": PAYOUT_STATUS_PENDING,
     "recorded": PAYOUT_STATUS_PENDING,
     "pending": PAYOUT_STATUS_PENDING,
     "processing": PAYOUT_STATUS_PENDING,
     "processed": PAYOUT_STATUS_PENDING,
-    "paid": PAYOUT_STATUS_SETTLED,
-    "completed": PAYOUT_STATUS_SETTLED,
-    "settled": PAYOUT_STATUS_SETTLED,
+    "paid": PAYOUT_STATUS_PAID,
+    "completed": PAYOUT_STATUS_PAID,
+    "settled": PAYOUT_STATUS_PAID,
 }
 PAYOUT_STATUS_FILTER_VALUES = frozenset(PAYOUT_STATUS_ALIASES) | {
     PAYOUT_STATUS_PENDING,
-    PAYOUT_STATUS_SETTLED,
+    PAYOUT_STATUS_PAID,
 }
 
 
@@ -131,7 +131,7 @@ def payout_status_filter_values(status_value: str | None) -> tuple[str, ...]:
 
 
 def is_settled_payout_status(status_value: str | None) -> bool:
-    return normalize_payout_status(status_value) == PAYOUT_STATUS_SETTLED
+    return normalize_payout_status(status_value) == PAYOUT_STATUS_PAID
 
 
 def validate_payment_submission(db: Session, payload, current_user: CurrentUser) -> ValidatedPaymentContext:

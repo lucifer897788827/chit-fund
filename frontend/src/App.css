@@ -163,6 +163,14 @@ body {
     background: #115e59;
 }
 
+.action-button:focus-visible,
+.tab-button:focus-visible,
+.bottom-nav__link:focus-visible,
+.quiet-card-link:focus-visible {
+    outline: 3px solid rgba(15, 118, 110, 0.35);
+    outline-offset: 2px;
+}
+
 .action-button:disabled {
     cursor: progress;
     opacity: 0.7;
@@ -426,7 +434,7 @@ body {
 
 .bottom-nav__rail {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0.35rem;
     width: min(100%, 48rem);
     margin: 0 auto;
@@ -454,6 +462,12 @@ body {
     text-decoration: none;
 }
 
+.bottom-nav__link--button {
+    border: 0;
+    background: transparent;
+    font: inherit;
+}
+
 .bottom-nav__icon {
     width: 1.05rem;
     height: 1.05rem;
@@ -462,6 +476,133 @@ body {
 .bottom-nav__link--active {
     background: rgba(15, 118, 110, 0.12);
     color: #0f766e;
+}
+
+.tab-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.tab-button {
+    min-height: 2.75rem;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    border-radius: 0.75rem;
+    background: #fff;
+    color: #334155;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.tab-button--active {
+    border-color: rgba(15, 118, 110, 0.35);
+    background: rgba(15, 118, 110, 0.12);
+    color: #0f766e;
+}
+
+.quiet-card-link {
+    color: inherit;
+    text-decoration: none;
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.75rem;
+    padding: 0.25rem 0.65rem;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    border-radius: 999px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 0.78rem;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.status-badge--success {
+    border-color: rgba(5, 150, 105, 0.3);
+    background: #ecfdf5;
+    color: #047857;
+}
+
+.status-badge--danger {
+    border-color: rgba(220, 38, 38, 0.28);
+    background: #fef2f2;
+    color: #b91c1c;
+}
+
+.status-badge--warning {
+    border-color: rgba(217, 119, 6, 0.32);
+    background: #fffbeb;
+    color: #92400e;
+}
+
+.status-panel {
+    padding: 1rem;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 1rem;
+    background: #f8fafc;
+}
+
+.status-panel--success {
+    border-color: rgba(5, 150, 105, 0.22);
+    background: #ecfdf5;
+}
+
+.status-panel--danger {
+    border-color: rgba(220, 38, 38, 0.22);
+    background: #fef2f2;
+}
+
+.status-panel--warning {
+    border-color: rgba(217, 119, 6, 0.24);
+    background: #fffbeb;
+}
+
+.empty-state {
+    padding: 1rem;
+    border: 1px dashed rgba(15, 23, 42, 0.18);
+    border-radius: 1rem;
+    background: #f8fafc;
+}
+
+.responsive-table {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.responsive-table table {
+    width: 100%;
+    min-width: 42rem;
+    border-collapse: collapse;
+}
+
+.responsive-table th,
+.responsive-table td {
+    padding: 0.8rem 0.9rem;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+    text-align: left;
+    vertical-align: middle;
+}
+
+.responsive-table th {
+    color: #475569;
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.responsive-table tbody tr:hover td {
+    background: rgba(240, 253, 250, 0.6);
+}
+
+.responsive-table tfoot td {
+    background: #f8fafc;
+    color: #0f172a;
+    font-weight: 800;
 }
 
 .panel-grid > .action-button,

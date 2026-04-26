@@ -1,0 +1,129 @@
+from fastapi.testclient import TestClient
+
+from app.core.security import hash_password
+from app.models import AdminMessage, User
+
+
+def _admin_headers(client: TestClient, db_session) -> dict[str, str]:
+    admin_user = User(
+        email="admin-message@example.com",
+        phone="7777777701",
+        password_hash=hash_password("admin-secret"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin_user)
+    db_session.commit()
+    response = client.post("/api/auth/login", json={"phone": "7777777701", "password": "admin-secret"})
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def test_admin_message_create_and_active_lookup(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    first_response = client.post(
+        "/api/admin/messages",
+        headers=headers,
+        json={"message": "Collection window closes tonight", "type": "warning", "active": True},
+    )
+    second_response = client.post(
+        "/api/admin/messages",
+        headers=headers,
+        json={"message": "System maintenance at 9 PM", "type": "critical", "active": True},
+    )
+    active_response = client.get("/api/admin/messages", headers=headers)
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+    assert active_response.status_code == 200
+    assert active_response.json()["message"] == "System maintenance at 9 PM"
+    assert active_response.json()["type"] == "critical"
+    messages = db_session.query(AdminMessage).order_by(AdminMessage.id.asc()).all()
+    assert [message.active for message in messages] == [False, True]
+
+
+def test_active_admin_message_is_visible_to_authenticated_users(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+    create_response = client.post(
+        "/api/admin/messages",
+        headers=headers,
+        json={"message": "Collection window closes tonight", "type": "warning", "active": True},
+    )
+    assert create_response.status_code == 201
+
+    login_response = client.post("/api/auth/login", json={"phone": "9999999999", "password": "secret123"})
+    headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+    response = client.get("/api/admin/messages", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Collection window closes tonight"
+    assert response.json()["type"] == "warning"
+
+
+def test_admin_message_create_requires_admin(app):
+    client = TestClient(app)
+    login_response = client.post("/api/auth/login", json={"phone": "9999999999", "password": "secret123"})
+    headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+    response = client.post(
+        "/api/admin/messages",
+        headers=headers,
+        json={"message": "Collection window closes tonight", "type": "warning", "active": True},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin role required"
+
+
+def test_admin_message_create_requires_authentication(app):
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/admin/messages",
+        json={"message": "Collection window closes tonight", "type": "warning", "active": True},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Not authenticated"
+
+
+def test_admin_user_management_lists_and_reads_users(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    list_response = client.get("/api/admin/users", headers=headers)
+    detail_response = client.get("/api/admin/users/1", headers=headers)
+
+    assert list_response.status_code == 200
+    assert any(user["id"] == 1 and user["role"] == "chit_owner" for user in list_response.json())
+    assert detail_response.status_code == 200
+    body = detail_response.json()
+    assert body["id"] == 1
+    assert body["role"] == "chit_owner"
+    assert "paymentBehavior" in body
+    assert "stats" in body
+
+
+def test_admin_user_management_requires_admin(app):
+    client = TestClient(app)
+    login_response = client.post("/api/auth/login", json={"phone": "9999999999", "password": "secret123"})
+    headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+    response = client.get("/api/admin/users", headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin role required"
+
+
+def test_admin_user_management_returns_404_for_missing_user(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    response = client.get("/api/admin/users/999", headers=headers)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found"

@@ -239,11 +239,22 @@ def queue_payment_reminders(as_of: str | None = None) -> list[dict[str, Any]]:
         metadata=metadata,
     )
     reminder_date = date.fromisoformat(as_of) if as_of else None
+    serialized_notifications: list[dict[str, Any]] = []
     with database.SessionLocal() as db:
         try:
             notifications = notify_payment_reminders(db, as_of=reminder_date)
             db.commit()
             dispatch_staged_notifications(db)
+            serialized_notifications = [
+                {
+                    "notificationId": notification.id,
+                    "userId": notification.user_id,
+                    "ownerId": notification.owner_id,
+                    "channel": notification.channel,
+                    "title": notification.title,
+                }
+                for notification in notifications
+            ]
         except Exception:
             log_job_event(
                 logger,
@@ -269,16 +280,7 @@ def queue_payment_reminders(as_of: str | None = None) -> list[dict[str, Any]]:
         metadata=metadata | {"result_count": len(notifications)},
     )
     _update_job_run(job_run.id, summary=metadata | {"resultCount": len(notifications)})
-    return [
-        {
-            "notificationId": notification.id,
-            "userId": notification.user_id,
-            "ownerId": notification.owner_id,
-            "channel": notification.channel,
-            "title": notification.title,
-        }
-        for notification in notifications
-    ]
+    return serialized_notifications
 
 
 @celery_system_task("notifications.cleanup_read_notifications")

@@ -696,6 +696,10 @@ export default function OwnerDashboard() {
       return;
     }
 
+    if (typeof window !== "undefined" && !window.confirm("Start this auction session with the selected rules?")) {
+      return;
+    }
+
     setCreatingAuctionSession(true);
     setAuctionSessionError("");
     setAuctionSessionMessage("");
