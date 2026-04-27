@@ -3,7 +3,12 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import GroupDetailPage from "./GroupDetailPage";
 import { getCurrentUser, sessionHasRole } from "../lib/auth/store";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import {
+  fetchOwnerDashboard,
+  fetchUserDashboard,
+  getOwnerDashboardFromUserDashboard,
+  getSubscriberDashboardFromUserDashboard,
+} from "../features/dashboard/api";
 import {
   closeGroupCollection,
   fetchGroupMemberSummary,
@@ -30,7 +35,9 @@ jest.mock("../lib/auth/store", () => ({
 
 jest.mock("../features/dashboard/api", () => ({
   fetchOwnerDashboard: jest.fn(),
-  fetchSubscriberDashboard: jest.fn(),
+  fetchUserDashboard: jest.fn(),
+  getOwnerDashboardFromUserDashboard: jest.fn((data) => data?.stats?.owner_dashboard ?? {}),
+  getSubscriberDashboardFromUserDashboard: jest.fn((data) => data?.stats?.subscriber_dashboard ?? {}),
 }));
 
 jest.mock("../features/auctions/api", () => ({
@@ -93,13 +100,27 @@ function renderGroupTab(tab) {
   );
 }
 
+function mockUserDashboard(ownerData = ownerDashboard, subscriberData = { memberships: [], activeAuctions: [] }) {
+  fetchUserDashboard.mockReset();
+  getOwnerDashboardFromUserDashboard.mockImplementation((data) => data?.stats?.owner_dashboard ?? {});
+  getSubscriberDashboardFromUserDashboard.mockImplementation((data) => data?.stats?.subscriber_dashboard ?? {});
+  fetchUserDashboard.mockImplementation(() => Promise.resolve({
+    role: "owner",
+    financial_summary: {},
+    stats: {
+      owner_dashboard: ownerData,
+      subscriber_dashboard: subscriberData,
+    },
+  }));
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   window.localStorage.clear();
   window.confirm = jest.fn(() => true);
   getCurrentUser.mockReturnValue({ owner_id: 1, role: "chit_owner" });
   sessionHasRole.mockImplementation((_session, role) => role === "owner");
-  fetchSubscriberDashboard.mockResolvedValue({ memberships: [], activeAuctions: [] });
+  mockUserDashboard();
   fetchOwnerDashboard.mockResolvedValue(ownerDashboard);
   fetchGroups.mockResolvedValue([groupDetail]);
   fetchPayments.mockResolvedValue([]);
@@ -151,18 +172,17 @@ test("closes collection through backend and updates the page from the response",
 });
 
 test("disables auction action until backend status is collection closed", async () => {
-  fetchOwnerDashboard.mockResolvedValue({
+  const activeAuction = {
+    groupId: 42,
+    sessionId: 77,
+    status: "open",
+    auctionMode: "LIVE",
+    validBidCount: 0,
+  };
+  mockUserDashboard({
     ...ownerDashboard,
-    recentAuctions: [
-      {
-        groupId: 42,
-        sessionId: 77,
-        status: "open",
-        auctionMode: "LIVE",
-        validBidCount: 0,
-      },
-    ],
-  });
+    recentAuctions: [activeAuction],
+  }, { memberships: [], activeAuctions: [activeAuction] });
   fetchGroupStatus.mockResolvedValue({
     collection_closed: false,
     status: "OPEN",

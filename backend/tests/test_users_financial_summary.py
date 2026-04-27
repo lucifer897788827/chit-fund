@@ -3,6 +3,8 @@ from datetime import date, datetime, timezone
 from fastapi.testclient import TestClient
 
 from app.models import AuctionBid, AuctionResult, AuctionSession, ChitGroup, GroupMembership, MembershipSlot, Payment, Payout
+from app.core.security import hash_password
+from app.models import User
 
 
 def _auth_headers(client: TestClient, phone: str, password: str) -> dict[str, str]:
@@ -123,3 +125,54 @@ def test_my_financial_summary_uses_payments_payouts_and_dividends(app, db_sessio
         "dividend": 100,
         "net": 3100,
     }
+
+
+def test_user_dashboard_supports_subscriber_owner_and_admin(app, db_session):
+    admin = User(
+        email="admin@example.com",
+        phone="7777777777",
+        password_hash=hash_password("adminpass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin)
+    db_session.commit()
+
+    client = TestClient(app)
+
+    owner_response = client.get(
+        "/api/users/me/dashboard",
+        headers=_auth_headers(client, "9999999999", "secret123"),
+    )
+    subscriber_response = client.get(
+        "/api/users/me/dashboard",
+        headers=_auth_headers(client, "8888888888", "pass123"),
+    )
+    admin_response = client.get(
+        "/api/users/me/dashboard",
+        headers=_auth_headers(client, "7777777777", "adminpass"),
+    )
+
+    assert owner_response.status_code == 200
+    assert owner_response.json()["role"] == "owner"
+    assert "owner_dashboard" in owner_response.json()["stats"]
+    assert "subscriber_dashboard" in owner_response.json()["stats"]
+
+    assert subscriber_response.status_code == 200
+    assert subscriber_response.json()["role"] == "subscriber"
+    assert "subscriber_dashboard" in subscriber_response.json()["stats"]
+
+    assert admin_response.status_code == 200
+    assert admin_response.json()["role"] == "admin"
+    assert "admin_summary" in admin_response.json()["stats"]
+
+
+def test_subscriber_dashboard_allows_owner_with_subscriber_profile(app):
+    client = TestClient(app)
+    response = client.get(
+        "/api/subscribers/dashboard",
+        headers=_auth_headers(client, "9999999999", "secret123"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["subscriberId"] == 1

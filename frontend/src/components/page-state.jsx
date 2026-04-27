@@ -1,22 +1,24 @@
-import { Loader2, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 
 import { normalizeApiError } from "../lib/api-error";
 import { cn } from "../lib/utils";
 
 function LoadingStateBody({ label, description }) {
   return (
-    <>
-      <Loader2 className="mt-1 h-5 w-5 animate-spin text-teal-700" aria-hidden="true" />
-      <div className="space-y-1">
-        <p className="font-semibold text-slate-900">{label}</p>
-        {description ? <p className="text-sm text-slate-600">{description}</p> : null}
-        <div aria-hidden="true" className="space-y-2 pt-2">
-          <div className="h-3 w-28 animate-pulse rounded-full bg-slate-200" />
-          <div className="h-3 w-full animate-pulse rounded-full bg-slate-100" />
-          <div className="h-3 w-5/6 animate-pulse rounded-full bg-slate-100" />
-        </div>
+    <div aria-label={label} className="w-full space-y-4" role="status">
+      <span className="sr-only">{description ? `${label} ${description}` : label}</span>
+      <div aria-hidden="true" className="grid gap-3 sm:grid-cols-3">
+        <div className="skeleton-card h-24 rounded-lg bg-slate-100" />
+        <div className="skeleton-card h-24 rounded-lg bg-slate-100" />
+        <div className="skeleton-card hidden h-24 rounded-lg bg-slate-100 sm:block" />
       </div>
-    </>
+      <div aria-hidden="true" className="space-y-3">
+        <div className="skeleton-card h-4 w-40 rounded-full bg-slate-200" />
+        <div className="skeleton-card h-3 w-full rounded-full bg-slate-100" />
+        <div className="skeleton-card h-3 w-11/12 rounded-full bg-slate-100" />
+        <div className="skeleton-card h-3 w-2/3 rounded-full bg-slate-100" />
+      </div>
+    </div>
   );
 }
 
@@ -57,12 +59,12 @@ function ErrorStateBody({ error, fallbackMessage, onRetry, retryLabel, title }) 
 }
 
 export function SectionLoadingState({
-  label = "Loading...",
+  label = "Preparing content",
   description = "Please wait while we fetch the latest data.",
   className,
 }) {
   return (
-    <section className={cn("panel flex items-start gap-3", className)} aria-live="polite" role="status">
+    <section className={cn("panel", className)} aria-live="polite">
       <LoadingStateBody description={description} label={label} />
     </section>
   );
@@ -109,7 +111,7 @@ export function AsyncSectionState({
   loading,
   error,
   empty,
-  loadingLabel = "Loading...",
+  loadingLabel = "Preparing content",
   loadingDescription = "Please wait while we fetch the latest data.",
   emptyTitle = "Nothing here yet.",
   emptyDescription = "There is nothing to show right now.",
@@ -156,7 +158,7 @@ export function AsyncSectionState({
 }
 
 export function PageLoadingState({
-  label = "Loading...",
+  label = "Preparing content",
   description = "Please wait while we fetch the latest data.",
   className,
 }) {

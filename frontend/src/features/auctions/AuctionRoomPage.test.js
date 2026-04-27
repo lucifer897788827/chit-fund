@@ -420,6 +420,51 @@ test("keeps the bid path working when the bid response includes the new session 
   expect(screen.getByRole("button", { name: /Submit Bid/i })).toBeDisabled();
 });
 
+test("shows an optimistic bid state while the bid is syncing", async () => {
+  const user = userEvent.setup();
+  let resolveBid;
+  submitBid.mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolveBid = resolve;
+    }),
+  );
+
+  await renderRoom(
+    makeRoom({
+      myBidCount: 1,
+      myBidLimit: 3,
+      myRemainingBidCapacity: 2,
+      minBidValue: 5000,
+      maxBidValue: 20000,
+      minIncrement: 500,
+    }),
+  );
+
+  await user.type(screen.getByLabelText(/Place Bid/i), "12000");
+  await user.click(screen.getByRole("button", { name: /Submit Bid/i }));
+
+  expect(await screen.findByText(/Submitting.*12,000/i)).toBeInTheDocument();
+  expect(screen.getByText(hasText("My last bid: 12000"))).toBeInTheDocument();
+  expect(screen.getAllByText(/You can bid 1 more times/i).length).toBeGreaterThan(0);
+  expect(screen.getByText(/Syncing with the auction room/i)).toBeInTheDocument();
+
+  await act(async () => {
+    resolveBid({
+      accepted: true,
+      placedAt: new Date("2026-07-10T10:00:30Z").toISOString(),
+      sessionStatus: "open",
+      room: makeRoom({
+        myBidCount: 2,
+        myBidLimit: 3,
+        myRemainingBidCapacity: 1,
+        myLastBid: 12000,
+      }),
+    });
+  });
+
+  expect(await screen.findByText(/Bid accepted/i)).toBeInTheDocument();
+});
+
 test("surfaces backend validation details when the server rejects a bid", async () => {
   const user = userEvent.setup();
   await renderRoom(

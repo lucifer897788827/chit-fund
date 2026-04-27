@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 
 import { recordPayment } from "./api";
@@ -12,6 +13,25 @@ import PaymentPanel from "./PaymentPanel";
 beforeEach(() => {
   jest.clearAllMocks();
 });
+
+function renderWithQuery(ui) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: {
+        retry: false,
+      },
+      queries: {
+        retry: false,
+      },
+    },
+  });
+
+  function Wrapper({ children }) {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  return render(ui, { wrapper: Wrapper });
+}
 
 test("adds a newly recorded payment to the history list", async () => {
   const user = userEvent.setup();
@@ -30,7 +50,7 @@ test("adds a newly recorded payment to the history list", async () => {
     status: "recorded",
   });
 
-  render(
+  renderWithQuery(
     <PaymentPanel
       ownerId={17}
       initialPayments={[

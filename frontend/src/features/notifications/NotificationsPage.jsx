@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { BellRing, CheckCheck, Clock3, Inbox, Loader2 } from "lucide-react";
+import { BellRing, CheckCheck, Clock3, Inbox } from "lucide-react";
 
 import { PageErrorState, PageLoadingState } from "../../components/page-state";
 import { useSignedInShellHeader } from "../../components/signed-in-shell";
@@ -193,7 +193,7 @@ function NotificationCard({ notification, onMarkRead, marking, dashboardPath, ro
           onClick={() => onMarkRead(notification)}
           type="button"
         >
-          {marking ? "Loading..." : isRead ? "Marked read" : "Mark read"}
+          {marking ? "Marking..." : isRead ? "Marked read" : "Mark read"}
         </button>
       </div>
 
@@ -487,7 +487,7 @@ export default function NotificationsPage() {
                 onClick={() => void refreshNotificationsFeed(loadedPageCount || 1, { surfaceErrors: true })}
                 type="button"
               >
-                {refreshingNotifications ? "Loading..." : "Refresh"}
+                {refreshingNotifications ? "Refreshing..." : "Refresh"}
               </button>
               <button
                 className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
@@ -559,7 +559,7 @@ export default function NotificationsPage() {
                 onClick={() => void handleLoadMore()}
                 type="button"
               >
-                {loadingMore ? "Loading..." : "Load more"}
+                {loadingMore ? "Loading more..." : "Load more"}
               </button>
             </div>
           ) : null}
@@ -580,7 +580,7 @@ export default function NotificationsPage() {
       ) : null}
       {!loading && !error && totalCount === 0 ? (
         <p className="text-sm text-slate-600">
-          <Loader2 className="mr-2 inline-block h-4 w-4 animate-spin text-teal-700" aria-hidden="true" />
+          <span className="skeleton-card mr-2 inline-block h-3 w-10 rounded-full bg-slate-200 align-middle" aria-hidden="true" />
           Waiting for the first notification to arrive.
         </p>
       ) : null}

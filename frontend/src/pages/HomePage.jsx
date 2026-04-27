@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
 import { PageErrorState, PageLoadingState } from "../components/page-state";
@@ -6,8 +7,14 @@ import { useAppShellHeader } from "../components/app-shell";
 import { getApiErrorMessage } from "../lib/api-error";
 import { getCurrentUser, getUserRoles, sessionHasRole } from "../lib/auth/store";
 import { fetchActiveAdminMessage } from "../features/admin/api";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import { fetchPublicChits } from "../features/auctions/api";
+import {
+  fetchUserDashboard,
+  getOwnerDashboardFromUserDashboard,
+  getSubscriberDashboardFromUserDashboard,
+} from "../features/dashboard/api";
 import { formatMoney } from "../features/payments/balances";
+import { fetchMyFinancialSummary } from "../features/users/api";
 
 const DISMISSED_ADMIN_MESSAGE_KEY = "chit-fund-dismissed-admin-message";
 
@@ -37,55 +44,90 @@ function titleCase(value) {
     .join(" ");
 }
 
+const ActiveGroupCard = memo(function ActiveGroupCard({ group, index }) {
+  const groupId = group.groupId ?? group.id;
+  const title = group.title ?? group.groupTitle ?? `Group #${groupId ?? index + 1}`;
+  const status = group.status ?? group.membershipStatus ?? "active";
+
+  return (
+    <Link className="quiet-card-link" to={groupId ? `/groups/${groupId}` : "/groups"}>
+      <article className="panel">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h3>{title}</h3>
+          <span className={getStatusBadgeClass(status)}>{titleCase(status)}</span>
+        </div>
+        <p>{group.groupCode ?? "Code not available"}</p>
+        <p>Cycle {group.currentCycleNo ?? "N/A"}</p>
+      </article>
+    </Link>
+  );
+});
+
+const PendingPaymentCard = memo(function PendingPaymentCard({ item }) {
+  return (
+    <article className="panel status-panel status-panel--danger">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h3>{item.groupTitle ?? item.memberName ?? `Member #${item.memberNo ?? item.membershipId ?? "N/A"}`}</h3>
+        <span className="status-badge status-badge--danger">Pending</span>
+      </div>
+      <p>{item.groupCode ?? `Group #${item.groupId ?? "N/A"}`}</p>
+      <p className="mt-2 text-lg font-semibold text-red-800">
+        {formatMoney(item.outstandingAmount ?? item.arrearsAmount ?? 0)} pending
+      </p>
+      <Link className="action-button" to="/payments">
+        Review payment
+      </Link>
+    </article>
+  );
+});
+
+const AuctionAlertCard = memo(function AuctionAlertCard({ auction }) {
+  return (
+    <article className="panel">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h3>{auction.groupTitle ?? `Group #${auction.groupId ?? "N/A"}`}</h3>
+        <span className={getStatusBadgeClass(auction.status)}>{titleCase(auction.status)}</span>
+      </div>
+      <p>
+        {auction.groupCode ?? "Code not available"} · Cycle {auction.cycleNo ?? "N/A"}
+      </p>
+      {auction.sessionId ? (
+        <Link className="action-button" to={`/groups/${auction.groupId}?tab=auction`}>
+          Open auction
+        </Link>
+      ) : null}
+    </article>
+  );
+});
+
 export default function HomePage() {
+  const queryClient = useQueryClient();
   const currentUser = getCurrentUser();
   const roles = getUserRoles(currentUser);
   const isOwner = sessionHasRole(currentUser, "owner");
-  const isAdmin = sessionHasRole(currentUser, "admin");
-  const [ownerDashboard, setOwnerDashboard] = useState(null);
-  const [memberDashboard, setMemberDashboard] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const [adminMessage, setAdminMessage] = useState("");
   const [dismissedAdminMessage, setDismissedAdminMessage] = useState(() => readDismissedAdminMessage());
   const showAdminMessage = Boolean(adminMessage && dismissedAdminMessage !== adminMessage);
+  const {
+    data: dashboardData,
+    error: dashboardError,
+    isLoading,
+  } = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: fetchUserDashboard,
+    staleTime: 30_000,
+  });
+  const ownerDashboard = dashboardData?.role === "owner" ? getOwnerDashboardFromUserDashboard(dashboardData) : null;
+  const memberDashboard =
+    dashboardData && dashboardData?.role !== "admin" ? getSubscriberDashboardFromUserDashboard(dashboardData) : null;
+  const error = dashboardError
+    ? getApiErrorMessage(dashboardError, { fallbackMessage: "Unable to load home right now." })
+    : "";
 
   useAppShellHeader({
     title: "Home",
     contextLabel: roles.length ? `${roles.join(" + ")} workspace` : "Today in your chit fund workspace",
   });
-
-  useEffect(() => {
-    let active = true;
-    const loads = [];
-
-    if (isOwner) {
-      loads.push(fetchOwnerDashboard().then((data) => active && setOwnerDashboard(data)));
-    }
-    if (!isAdmin) {
-      loads.push(fetchSubscriberDashboard().then((data) => active && setMemberDashboard(data)));
-    }
-
-    Promise.allSettled(loads)
-      .then((results) => {
-        if (!active) {
-          return;
-        }
-        const failed = results.find((result) => result.status === "rejected");
-        if (failed) {
-          setError(getApiErrorMessage(failed.reason, { fallbackMessage: "Unable to load home right now." }));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [isAdmin, isOwner]);
 
   useEffect(() => {
     let active = true;
@@ -104,6 +146,19 @@ export default function HomePage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    queryClient.prefetchQuery({
+      queryKey: ["groups", "public"],
+      queryFn: fetchPublicChits,
+      staleTime: 30_000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["profile", "financial-summary"],
+      queryFn: fetchMyFinancialSummary,
+      staleTime: 30_000,
+    });
+  }, [queryClient]);
 
   function handleDismissAdminMessage() {
     if (typeof window !== "undefined") {
@@ -135,7 +190,7 @@ export default function HomePage() {
     };
   }, [isOwner, memberDashboard, ownerDashboard]);
 
-  if (loading) {
+  if (isLoading) {
     return <PageLoadingState description="Loading your groups, dues, and auction access." label="Loading home..." />;
   }
 
@@ -165,23 +220,9 @@ export default function HomePage() {
         <h2>Active groups</h2>
         {homeData.activeGroups.length === 0 ? <p>No active groups are visible right now.</p> : null}
         <div className="panel-grid md:grid-cols-2">
-          {homeData.activeGroups.map((group, index) => {
-            const groupId = group.groupId ?? group.id;
-            const title = group.title ?? group.groupTitle ?? `Group #${groupId ?? index + 1}`;
-            const status = group.status ?? group.membershipStatus ?? "active";
-            return (
-              <Link className="quiet-card-link" key={`${groupId ?? title}-${index}`} to={groupId ? `/groups/${groupId}` : "/groups"}>
-                <article className="panel">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <h3>{title}</h3>
-                    <span className={getStatusBadgeClass(status)}>{titleCase(status)}</span>
-                  </div>
-                  <p>{group.groupCode ?? "Code not available"}</p>
-                  <p>Cycle {group.currentCycleNo ?? "N/A"}</p>
-                </article>
-              </Link>
-            );
-          })}
+          {homeData.activeGroups.map((group, index) => (
+            <ActiveGroupCard group={group} index={index} key={`${group.groupId ?? group.id ?? group.title}-${index}`} />
+          ))}
         </div>
       </section>
 
@@ -195,19 +236,7 @@ export default function HomePage() {
         ) : null}
         <div className="panel-grid md:grid-cols-2">
           {homeData.pendingPayments.map((item, index) => (
-            <article className="panel status-panel status-panel--danger" key={`${item.membershipId ?? item.subscriberId ?? index}`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <h3>{item.groupTitle ?? item.memberName ?? `Member #${item.memberNo ?? item.membershipId ?? "N/A"}`}</h3>
-                <span className="status-badge status-badge--danger">Pending</span>
-              </div>
-              <p>{item.groupCode ?? `Group #${item.groupId ?? "N/A"}`}</p>
-              <p className="mt-2 text-lg font-semibold text-red-800">
-                {formatMoney(item.outstandingAmount ?? item.arrearsAmount ?? 0)} pending
-              </p>
-              <Link className="action-button" to="/payments">
-                Review payment
-              </Link>
-            </article>
+            <PendingPaymentCard item={item} key={`${item.membershipId ?? item.subscriberId ?? index}`} />
           ))}
         </div>
       </section>
@@ -217,20 +246,7 @@ export default function HomePage() {
         {homeData.auctionAlerts.length === 0 ? <p>No live or upcoming auction alerts right now.</p> : null}
         <div className="panel-grid md:grid-cols-2">
           {homeData.auctionAlerts.map((auction, index) => (
-            <article className="panel" key={`${auction.sessionId ?? index}`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <h3>{auction.groupTitle ?? `Group #${auction.groupId ?? "N/A"}`}</h3>
-                <span className={getStatusBadgeClass(auction.status)}>{titleCase(auction.status)}</span>
-              </div>
-              <p>
-                {auction.groupCode ?? "Code not available"} · Cycle {auction.cycleNo ?? "N/A"}
-              </p>
-              {auction.sessionId ? (
-                <Link className="action-button" to={`/groups/${auction.groupId}?tab=auction`}>
-                  Open auction
-                </Link>
-              ) : null}
-            </article>
+            <AuctionAlertCard auction={auction} key={`${auction.sessionId ?? index}`} />
           ))}
         </div>
       </section>

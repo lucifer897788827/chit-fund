@@ -1,9 +1,10 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
 import ProfilePage from "./ProfilePage";
 import { getCurrentUser, getUserRoles, sessionHasRole } from "../lib/auth/store";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import { fetchOwnerDashboard, fetchUserDashboard } from "../features/dashboard/api";
 import { fetchMyFinancialSummary } from "../features/users/api";
 
 jest.mock("../components/app-shell", () => ({
@@ -26,7 +27,9 @@ jest.mock("../features/owner-requests/api", () => ({
 
 jest.mock("../features/dashboard/api", () => ({
   fetchOwnerDashboard: jest.fn(),
-  fetchSubscriberDashboard: jest.fn(),
+  fetchUserDashboard: jest.fn(),
+  getOwnerDashboardFromUserDashboard: jest.fn((data) => data?.stats?.owner_dashboard ?? {}),
+  getSubscriberDashboardFromUserDashboard: jest.fn((data) => data?.stats?.subscriber_dashboard ?? {}),
 }));
 
 jest.mock("../features/users/api", () => ({
@@ -47,22 +50,29 @@ beforeEach(() => {
   });
   getUserRoles.mockReturnValue(["owner"]);
   sessionHasRole.mockImplementation((_session, role) => role === "owner");
-  fetchSubscriberDashboard.mockResolvedValue({
-    memberships: [
-      {
-        groupId: 42,
-        installmentAmount: 5000,
-        slotCount: 1,
-        membershipStatus: "active",
-        wonSlotCount: 1,
-        prizedStatus: "prized",
+  fetchUserDashboard.mockResolvedValue({
+    role: "owner",
+    financial_summary: {},
+    stats: {
+      owner_dashboard: {
+        totalPaidAmount: 1000,
+        recentPayouts: [],
       },
-    ],
+      subscriber_dashboard: {
+        memberships: [
+          {
+            groupId: 42,
+            installmentAmount: 5000,
+            slotCount: 1,
+            membershipStatus: "active",
+            wonSlotCount: 1,
+            prizedStatus: "prized",
+          },
+        ],
+      },
+    },
   });
-  fetchOwnerDashboard.mockResolvedValue({
-    totalPaidAmount: 1000,
-    recentPayouts: [],
-  });
+  fetchOwnerDashboard.mockResolvedValue({ totalPaidAmount: 1000, recentPayouts: [] });
   fetchMyFinancialSummary.mockResolvedValue({
     total_paid: 1000,
     total_received: 4000,
@@ -71,12 +81,31 @@ beforeEach(() => {
   });
 });
 
-test("uses backend financial summary instead of approximate local totals", async () => {
-  render(
-    <MemoryRouter>
-      <ProfilePage />
-    </MemoryRouter>,
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        staleTime: 30_000,
+      },
+    },
+  });
+}
+
+function renderProfilePage(queryClient = createTestQueryClient()) {
+  const result = render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <ProfilePage />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
+
+  return { ...result, queryClient };
+}
+
+test("uses backend financial summary instead of approximate local totals", async () => {
+  renderProfilePage();
 
   await waitFor(() => expect(fetchMyFinancialSummary).toHaveBeenCalled());
   expect(await screen.findByText("Rs. 1,000")).toBeInTheDocument();
@@ -84,4 +113,18 @@ test("uses backend financial summary instead of approximate local totals", async
   expect(screen.getByText("Rs. 4,000")).toBeInTheDocument();
   expect(screen.getByText("Rs. 3,100")).toBeInTheDocument();
   expect(screen.queryByText("Approximate calculation")).not.toBeInTheDocument();
+});
+
+test("reuses cached profile dashboard and financial summary on remount", async () => {
+  const queryClient = createTestQueryClient();
+  const firstRender = renderProfilePage(queryClient);
+
+  expect(await screen.findByRole("heading", { name: "Profile" })).toBeInTheDocument();
+  firstRender.unmount();
+
+  renderProfilePage(queryClient);
+
+  expect(await screen.findByRole("heading", { name: "Profile" })).toBeInTheDocument();
+  expect(fetchUserDashboard).toHaveBeenCalledTimes(1);
+  expect(fetchMyFinancialSummary).toHaveBeenCalledTimes(1);
 });

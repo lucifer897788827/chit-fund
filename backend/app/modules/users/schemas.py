@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Any
 
 
 class FinancialSummaryResponse(BaseModel):
@@ -6,3 +7,9 @@ class FinancialSummaryResponse(BaseModel):
     total_received: int
     dividend: int
     net: int
+
+
+class UserDashboardResponse(BaseModel):
+    role: str
+    financial_summary: FinancialSummaryResponse
+    stats: dict[str, Any]

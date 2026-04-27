@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
 import { PageErrorState, PageLoadingState } from "../components/page-state";
 import { useAppShellHeader } from "../components/app-shell";
 import { getApiErrorMessage } from "../lib/api-error";
 import { getCurrentUser, sessionHasRole } from "../lib/auth/store";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import {
+  fetchUserDashboard,
+  getOwnerDashboardFromUserDashboard,
+  getSubscriberDashboardFromUserDashboard,
+} from "../features/dashboard/api";
 import { fetchPayments } from "../features/payments/api";
 import { formatMoney } from "../features/payments/balances";
 
@@ -39,52 +44,53 @@ function getMonthLabel(value) {
   return new Intl.DateTimeFormat("en-IN", { month: "short", year: "numeric" }).format(date);
 }
 
+const PaymentRow = memo(function PaymentRow({ row }) {
+  return (
+    <tr>
+      <td>{row.groupId ? <Link to={`/groups/${row.groupId}?tab=payments`}>{row.group}</Link> : row.group}</td>
+      <td>{row.month}</td>
+      <td>
+        <span className={getStatusBadgeClass(row.status)}>{titleCase(row.status)}</span>
+      </td>
+      <td>{formatMoney(row.paid)}</td>
+    </tr>
+  );
+});
+
 export default function PaymentsPage() {
   const currentUser = getCurrentUser();
   const isOwner = sessionHasRole(currentUser, "owner");
-  const [payments, setPayments] = useState([]);
-  const [balances, setBalances] = useState([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const [groupFilter, setGroupFilter] = useState("all");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
   useAppShellHeader({
     title: "Payments",
     contextLabel: "Aggregated payment status across groups",
   });
 
-  useEffect(() => {
-    let active = true;
-    const load = isOwner
-      ? Promise.all([fetchPayments(), fetchOwnerDashboard()]).then(([paymentData, dashboardData]) => {
-          if (active) {
-            setPayments(Array.isArray(paymentData) ? paymentData : []);
-            setBalances(dashboardData?.balances ?? []);
-          }
-        })
-      : fetchSubscriberDashboard().then((data) => {
-          if (active) {
-            setBalances(data?.memberships ?? []);
-          }
-        });
-
-    load
-      .catch((loadError) => {
-        if (active) {
-          setError(getApiErrorMessage(loadError, { fallbackMessage: "Unable to load payments right now." }));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [isOwner]);
+  const dashboardQuery = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: fetchUserDashboard,
+    staleTime: 30_000,
+  });
+  const paymentsQuery = useQuery({
+    queryKey: ["payments"],
+    queryFn: fetchPayments,
+    staleTime: 30_000,
+    enabled: isOwner,
+  });
+  const dashboardData = dashboardQuery.data;
+  const payments = useMemo(() => (isOwner && Array.isArray(paymentsQuery.data) ? paymentsQuery.data : []), [isOwner, paymentsQuery.data]);
+  const balances = useMemo(
+    () =>
+      isOwner
+        ? getOwnerDashboardFromUserDashboard(dashboardData)?.balances ?? []
+        : getSubscriberDashboardFromUserDashboard(dashboardData)?.memberships ?? [],
+    [dashboardData, isOwner],
+  );
+  const loading = dashboardQuery.isLoading || (isOwner && paymentsQuery.isLoading);
+  const errorSource = dashboardQuery.error ?? paymentsQuery.error;
+  const error = errorSource ? getApiErrorMessage(errorSource, { fallbackMessage: "Unable to load payments right now." }) : "";
 
   const rows = useMemo(() => {
     if (isOwner && payments.length > 0) {
@@ -194,16 +200,7 @@ export default function PaymentsPage() {
               </thead>
               <tbody>
                 {filteredRows.map((row, index) => (
-                  <tr key={row.id ?? `${row.group}-${index}`}>
-                    <td>
-                      {row.groupId ? <Link to={`/groups/${row.groupId}?tab=payments`}>{row.group}</Link> : row.group}
-                    </td>
-                    <td>{row.month}</td>
-                    <td>
-                      <span className={getStatusBadgeClass(row.status)}>{titleCase(row.status)}</span>
-                    </td>
-                    <td>{formatMoney(row.paid)}</td>
-                  </tr>
+                  <PaymentRow key={row.id ?? `${row.group}-${index}`} row={row} />
                 ))}
               </tbody>
             </table>

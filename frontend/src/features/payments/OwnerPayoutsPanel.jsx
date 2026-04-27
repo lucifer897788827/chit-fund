@@ -145,7 +145,7 @@ function PayoutRow({ payout, onSettle, settling }) {
       <div className="mt-4 flex flex-wrap items-center gap-3">
         {isPending ? (
           <button className="action-button" disabled={settling} onClick={() => onSettle(payout)} type="button">
-            {settling ? "Loading..." : "Mark settled"}
+            {settling ? "Settling..." : "Mark settled"}
           </button>
         ) : null}
         {isSettled ? <p className="text-sm text-emerald-700">This payout has already been settled.</p> : null}

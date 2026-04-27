@@ -1,4 +1,5 @@
 import "./App.css";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import AppShell from "./components/app-shell";
@@ -11,6 +12,7 @@ import SignupPage from "./features/auth/SignupPage";
 import ExternalChitsPage from "./features/external-chits/ExternalChitsPage";
 import NotificationsPage from "./features/notifications/NotificationsPage";
 import { AdminRoute, MemberRoute, OwnerRoute } from "./lib/auth/route-guards";
+import { queryClient } from "./lib/query-client";
 import ActionsPage from "./pages/ActionsPage";
 import CreateGroupPage from "./pages/CreateGroupPage";
 import GroupDetailPage from "./pages/GroupDetailPage";
@@ -29,9 +31,10 @@ import UsersPage from "./pages/admin/UsersPage";
 
 function App() {
   return (
-    <BrowserRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
-      <Toaster />
-      <Routes>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <Toaster />
+        <Routes>
         <Route path="/" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
@@ -96,8 +99,9 @@ function App() {
         <Route path="/subscriber-dashboard" element={<Navigate replace to="/home" />} />
         <Route path="/admin-dashboard" element={<Navigate replace to="/admin" />} />
         <Route path="*" element={<Navigate replace to="/" />} />
-      </Routes>
-    </BrowserRouter>
+        </Routes>
+      </BrowserRouter>
+    </QueryClientProvider>
   );
 }
 

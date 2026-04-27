@@ -17,9 +17,22 @@ export default function PaymentPanel({
     setPayments(Array.isArray(initialPayments) ? initialPayments : []);
   }, [initialPayments]);
 
-  function handleRecordedPayment(recordedPayment) {
+  function handleRecordedPayment(recordedPayment, meta = {}) {
+    if (meta.type === "rollback") {
+      setPayments((currentPayments) => currentPayments.filter((payment) => payment.id !== meta.optimisticId));
+      return;
+    }
+    if (meta.type === "replace") {
+      setPayments((currentPayments) =>
+        currentPayments.map((payment) => (payment.id === meta.optimisticId ? recordedPayment : payment)),
+      );
+      if (typeof onRecorded === "function") {
+        onRecorded(recordedPayment);
+      }
+      return;
+    }
     setPayments((currentPayments) => [recordedPayment, ...currentPayments]);
-    if (typeof onRecorded === "function") {
+    if (!meta.type && typeof onRecorded === "function") {
       onRecorded(recordedPayment);
     }
   }

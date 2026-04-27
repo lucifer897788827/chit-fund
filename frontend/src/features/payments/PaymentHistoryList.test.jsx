@@ -12,7 +12,7 @@ test("renders empty, loading, and error states for payment history", async () =>
   const onRetry = jest.fn();
   const { rerender } = render(<PaymentHistoryList payments={[]} loading />);
 
-  expect(screen.getByText("Loading payment history...")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading payment history..." })).toBeInTheDocument();
 
   rerender(<PaymentHistoryList payments={[]} onRetry={onRetry} />);
   expect(screen.getByText("No payments have been recorded yet.")).toBeInTheDocument();

@@ -5,7 +5,11 @@ import { PageErrorState, PageLoadingState } from "../components/page-state";
 import { useAppShellHeader } from "../components/app-shell";
 import { getApiErrorMessage } from "../lib/api-error";
 import { getCurrentUser, sessionHasRole } from "../lib/auth/store";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import {
+  fetchUserDashboard,
+  getOwnerDashboardFromUserDashboard,
+  getSubscriberDashboardFromUserDashboard,
+} from "../features/dashboard/api";
 import { closeGroupCollection, fetchGroupMemberSummary, fetchGroupStatus, fetchGroups, finalizeAuctionSession, inviteSubscriberToGroup } from "../features/auctions/api";
 import AuctionRoomPage from "../features/auctions/AuctionRoomPage";
 import OwnerAuctionConsole from "../features/auctions/OwnerAuctionConsole";
@@ -279,145 +283,89 @@ export default function GroupDetailPage() {
   const numericGroupId = Number(groupId);
 
   useEffect(() => {
-    if (!numericGroupId) {
-      return undefined;
-    }
     let active = true;
+
+    setLoading(true);
+    setError("");
     setGroupStatusError("");
-    fetchGroupStatus(numericGroupId)
-      .then((data) => {
-        if (active) {
-          setGroupStatus(data);
-        }
-      })
-      .catch((statusError) => {
-        if (active) {
-          setGroupStatusError(getApiErrorMessage(statusError, { fallbackMessage: "Unable to load group status." }));
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [numericGroupId]);
-
-  useEffect(() => {
-    if (!numericGroupId) {
-      return undefined;
-    }
-    let active = true;
     setGroupMemberSummaryError("");
-    fetchGroupMemberSummary(numericGroupId)
-      .then((data) => {
-        if (active) {
-          setGroupMemberSummary(Array.isArray(data) ? data : []);
-        }
-      })
-      .catch((summaryError) => {
-        if (active) {
-          setGroupMemberSummaryError(getApiErrorMessage(summaryError, { fallbackMessage: "Unable to load member summary." }));
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [numericGroupId]);
+    setPaymentsError("");
+    setPayoutsError("");
+    setPaymentsLoading(Boolean(isOwner && numericGroupId));
+    setPayoutsLoading(Boolean(isOwner && numericGroupId));
 
-  useEffect(() => {
-    let active = true;
-    const loads = [
-      fetchSubscriberDashboard().then((data) => {
-        if (active) {
-          setMemberDashboard(data);
-        }
-      }),
-    ];
-    if (isOwner) {
-      loads.push(
-        fetchOwnerDashboard().then((data) => {
-          if (active) {
-            setOwnerDashboard(data);
-          }
-        }),
-        fetchGroups().then((data) => {
-          if (active) {
-            setGroupDetails(Array.isArray(data) ? data : []);
-          }
-        }),
-      );
-    }
+    const dashboardPromise = fetchUserDashboard();
+    const groupsPromise = isOwner ? fetchGroups() : Promise.resolve([]);
+    const groupStatusPromise = numericGroupId ? fetchGroupStatus(numericGroupId) : Promise.resolve(null);
+    const groupMemberSummaryPromise = numericGroupId ? fetchGroupMemberSummary(numericGroupId) : Promise.resolve([]);
+    const paymentsPromise = isOwner && numericGroupId ? fetchPayments({ groupId: numericGroupId }) : Promise.resolve([]);
+    const payoutsPromise = isOwner && numericGroupId ? fetchOwnerPayouts({ groupId: numericGroupId }) : Promise.resolve([]);
 
-    Promise.allSettled(loads)
-      .then((results) => {
+    Promise.allSettled([
+      dashboardPromise,
+      groupsPromise,
+      groupStatusPromise,
+      groupMemberSummaryPromise,
+      paymentsPromise,
+      payoutsPromise,
+    ])
+      .then(([dashboardResult, groupsResult, groupStatusResult, groupMemberSummaryResult, paymentsResult, payoutsResult]) => {
         if (!active) {
           return;
         }
-        const failed = results.find((result) => result.status === "rejected");
-        if (failed) {
-          setError(getApiErrorMessage(failed.reason, { fallbackMessage: "Unable to load this group." }));
+
+        if (dashboardResult.status === "fulfilled") {
+          const data = dashboardResult.value;
+          setMemberDashboard(getSubscriberDashboardFromUserDashboard(data));
+          if (data?.role === "owner") {
+            setOwnerDashboard(getOwnerDashboardFromUserDashboard(data));
+          } else {
+            setOwnerDashboard(null);
+          }
+        } else {
+          setError(getApiErrorMessage(dashboardResult.reason, { fallbackMessage: "Unable to load this group." }));
+        }
+
+        if (groupsResult.status === "fulfilled") {
+          setGroupDetails(Array.isArray(groupsResult.value) ? groupsResult.value : []);
+        } else if (isOwner) {
+          setError(getApiErrorMessage(groupsResult.reason, { fallbackMessage: "Unable to load this group." }));
+        }
+
+        if (groupStatusResult.status === "fulfilled") {
+          setGroupStatus(groupStatusResult.value);
+        } else {
+          setGroupStatusError(getApiErrorMessage(groupStatusResult.reason, { fallbackMessage: "Unable to load group status." }));
+        }
+
+        if (groupMemberSummaryResult.status === "fulfilled") {
+          setGroupMemberSummary(Array.isArray(groupMemberSummaryResult.value) ? groupMemberSummaryResult.value : []);
+        } else {
+          setGroupMemberSummaryError(
+            getApiErrorMessage(groupMemberSummaryResult.reason, { fallbackMessage: "Unable to load member summary." }),
+          );
+        }
+
+        if (paymentsResult.status === "fulfilled") {
+          setPayments(Array.isArray(paymentsResult.value) ? paymentsResult.value : []);
+        } else if (isOwner) {
+          setPaymentsError(getApiErrorMessage(paymentsResult.reason, { fallbackMessage: "Unable to load payments." }));
+        }
+
+        if (payoutsResult.status === "fulfilled") {
+          setPayouts(Array.isArray(payoutsResult.value) ? payoutsResult.value : []);
+        } else if (isOwner) {
+          setPayoutsError(getApiErrorMessage(payoutsResult.reason, { fallbackMessage: "Unable to load payouts." }));
         }
       })
       .finally(() => {
         if (active) {
           setLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [isOwner]);
-
-  useEffect(() => {
-    if (!isOwner || !numericGroupId) {
-      return undefined;
-    }
-    let active = true;
-    setPaymentsLoading(true);
-    setPaymentsError("");
-    fetchPayments({ groupId: numericGroupId })
-      .then((data) => {
-        if (active) {
-          setPayments(Array.isArray(data) ? data : []);
-        }
-      })
-      .catch((paymentError) => {
-        if (active) {
-          setPaymentsError(getApiErrorMessage(paymentError, { fallbackMessage: "Unable to load payments." }));
-        }
-      })
-      .finally(() => {
-        if (active) {
           setPaymentsLoading(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [isOwner, numericGroupId]);
-
-  useEffect(() => {
-    if (!isOwner || !numericGroupId) {
-      return undefined;
-    }
-    let active = true;
-    setPayoutsLoading(true);
-    setPayoutsError("");
-    fetchOwnerPayouts({ groupId: numericGroupId })
-      .then((data) => {
-        if (active) {
-          setPayouts(Array.isArray(data) ? data : []);
-        }
-      })
-      .catch((payoutError) => {
-        if (active) {
-          setPayoutsError(getApiErrorMessage(payoutError, { fallbackMessage: "Unable to load payouts." }));
-        }
-      })
-      .finally(() => {
-        if (active) {
           setPayoutsLoading(false);
         }
       });
+
     return () => {
       active = false;
     };

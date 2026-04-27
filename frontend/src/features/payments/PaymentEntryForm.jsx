@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 
 import { FormActions, FormField, FormFrame } from "../../components/form-primitives";
 import { toast } from "../../hooks/use-toast";
@@ -26,10 +27,56 @@ const initialDraft = (ownerId) => ({
 
 export default function PaymentEntryForm({ ownerId, onRecorded }) {
   const [draft, setDraft] = useState(() => initialDraft(ownerId));
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [lastRecordedPayment, setLastRecordedPayment] = useState(null);
+  const recordPaymentMutation = useMutation({
+    mutationFn: (payload) => recordPayment(payload),
+    onMutate: (payload) => {
+      const optimisticId = `optimistic-payment-${Date.now()}`;
+      const optimisticPayment = {
+        ...payload,
+        id: optimisticId,
+        paymentId: optimisticId,
+        status: "recording",
+        paymentStatus: "recording",
+        __optimistic: true,
+      };
+      setError("");
+      setSuccess("Payment recording...");
+      setLastRecordedPayment(optimisticPayment);
+      if (typeof onRecorded === "function") {
+        onRecorded(optimisticPayment, { type: "optimistic", optimisticId });
+      }
+      return { optimisticId };
+    },
+    onSuccess: (recordedPayment, payload, context) => {
+      setLastRecordedPayment(recordedPayment);
+      setSuccess("Payment recorded successfully.");
+      toast({
+        title: "Payment recorded",
+        description: `${formatAmount(recordedPayment.amount ?? payload.amount)} saved successfully.`,
+      });
+      if (typeof onRecorded === "function") {
+        onRecorded(recordedPayment, { type: "replace", optimisticId: context?.optimisticId });
+      }
+    },
+    onError: (submitError, _payload, context) => {
+      if (typeof onRecorded === "function") {
+        onRecorded(null, { type: "rollback", optimisticId: context?.optimisticId });
+      }
+      setLastRecordedPayment(null);
+      const detail = submitError?.response?.data?.detail;
+      const message =
+        detail ||
+        submitError?.response?.data?.message ||
+        submitError?.message ||
+        "Unable to record this payment right now.";
+      setError(message);
+      setSuccess("");
+    },
+  });
+  const submitting = recordPaymentMutation.isPending;
 
   useEffect(() => {
     setDraft((currentDraft) => {
@@ -82,32 +129,9 @@ export default function PaymentEntryForm({ ownerId, onRecorded }) {
       return;
     }
 
-    setSubmitting(true);
     setError("");
     setSuccess("");
-
-    try {
-      const recordedPayment = await recordPayment(payload);
-      setLastRecordedPayment(recordedPayment);
-      setSuccess("Payment recorded successfully.");
-      toast({
-        title: "Payment recorded",
-        description: `${formatAmount(recordedPayment.amount ?? payload.amount)} saved successfully.`,
-      });
-      if (typeof onRecorded === "function") {
-        onRecorded(recordedPayment);
-      }
-    } catch (submitError) {
-      const detail = submitError?.response?.data?.detail;
-      const message =
-        detail ||
-        submitError?.response?.data?.message ||
-        submitError?.message ||
-        "Unable to record this payment right now.";
-      setError(message);
-    } finally {
-      setSubmitting(false);
-    }
+    recordPaymentMutation.mutate(payload);
   }
 
   const latestPaymentStatus = getPaymentStatus(lastRecordedPayment);
@@ -270,7 +294,7 @@ export default function PaymentEntryForm({ ownerId, onRecorded }) {
             }
           >
             <button className="action-button" disabled={submitting} type="submit">
-              {submitting ? "Loading..." : "Record payment"}
+              {submitting ? "Recording..." : "Record payment"}
             </button>
           </FormActions>
         </form>

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 
 import { PageLoadingState } from "../components/page-state";
@@ -7,7 +8,11 @@ import { getApiErrorMessage } from "../lib/api-error";
 import { getCurrentUser, getUserRoles, sessionHasRole } from "../lib/auth/store";
 import { logoutUser } from "../features/auth/api";
 import { createOwnerRequest } from "../features/owner-requests/api";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import {
+  fetchUserDashboard,
+  getOwnerDashboardFromUserDashboard,
+  getSubscriberDashboardFromUserDashboard,
+} from "../features/dashboard/api";
 import { formatMoney } from "../features/payments/balances";
 import { fetchMyFinancialSummary } from "../features/users/api";
 
@@ -15,16 +20,29 @@ function getFirstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? null;
 }
 
+const MetricCard = memo(function MetricCard({ label, tone = "", value }) {
+  return (
+    <article className="panel">
+      <p className="text-sm uppercase tracking-wide text-slate-500">{label}</p>
+      <h3 className={tone}>{value}</h3>
+    </article>
+  );
+});
+
+const StatCard = memo(function StatCard({ label, value }) {
+  return (
+    <article className="panel">
+      <h3>{value}</h3>
+      <p>{label}</p>
+    </article>
+  );
+});
+
 export default function ProfilePage() {
   const navigate = useNavigate();
   const currentUser = getCurrentUser();
   const roles = getUserRoles(currentUser);
   const isOwner = sessionHasRole(currentUser, "owner");
-  const [ownerDashboard, setOwnerDashboard] = useState(null);
-  const [memberDashboard, setMemberDashboard] = useState(null);
-  const [financialSummary, setFinancialSummary] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
   const [requestState, setRequestState] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -33,50 +51,25 @@ export default function ProfilePage() {
     contextLabel: "Account access, financial snapshot, and quick links",
   });
 
-  useEffect(() => {
-    let active = true;
-    const loads = [
-      fetchSubscriberDashboard().then((data) => {
-        if (active) {
-          setMemberDashboard(data);
-        }
-      }),
-      fetchMyFinancialSummary().then((data) => {
-        if (active) {
-          setFinancialSummary(data);
-        }
-      }),
-    ];
-    if (isOwner) {
-      loads.push(
-        fetchOwnerDashboard().then((data) => {
-          if (active) {
-            setOwnerDashboard(data);
-          }
-        }),
-      );
-    }
-
-    Promise.allSettled(loads)
-      .then((results) => {
-        if (!active) {
-          return;
-        }
-        const failed = results.find((result) => result.status === "rejected");
-        if (failed) {
-          setLoadError(getApiErrorMessage(failed.reason, { fallbackMessage: "Some profile data could not be loaded." }));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [isOwner]);
+  const dashboardQuery = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: fetchUserDashboard,
+    staleTime: 30_000,
+  });
+  const financialSummaryQuery = useQuery({
+    queryKey: ["profile", "financial-summary"],
+    queryFn: fetchMyFinancialSummary,
+    staleTime: 30_000,
+  });
+  const dashboardData = dashboardQuery.data;
+  const ownerDashboard = dashboardData?.role === "owner" ? getOwnerDashboardFromUserDashboard(dashboardData) : null;
+  const memberDashboard = getSubscriberDashboardFromUserDashboard(dashboardData);
+  const financialSummary = financialSummaryQuery.data;
+  const loading = dashboardQuery.isLoading || financialSummaryQuery.isLoading;
+  const loadErrorSource = dashboardQuery.error ?? financialSummaryQuery.error;
+  const loadError = loadErrorSource
+    ? getApiErrorMessage(loadErrorSource, { fallbackMessage: "Some profile data could not be loaded." })
+    : "";
 
   const snapshot = useMemo(() => {
     const memberships = memberDashboard?.memberships ?? [];
@@ -127,21 +120,44 @@ export default function ProfilePage() {
     }
   }
 
-  if (loading) {
-    return <PageLoadingState description="Loading account and financial snapshot." label="Loading profile..." />;
-  }
-
   const user = currentUser?.user ?? {};
   const displayName =
     getFirstDefined(user.name, user.fullName, user.full_name, currentUser?.fullName, currentUser?.full_name, currentUser?.displayName) ??
     (user.id || currentUser?.userId ? `User #${user.id ?? currentUser.userId}` : "Profile");
-  const profileFields = [
-    { label: "Name", value: displayName },
-    { label: "Phone", value: getFirstDefined(user.phone, user.phoneNumber, user.phone_number, currentUser?.phone, currentUser?.phoneNumber) },
-    { label: "Email", value: getFirstDefined(user.email, currentUser?.email) },
-  ].filter((field) => field.value);
+  const profileFields = useMemo(
+    () =>
+      [
+        { label: "Name", value: displayName },
+        { label: "Phone", value: getFirstDefined(user.phone, user.phoneNumber, user.phone_number, currentUser?.phone, currentUser?.phoneNumber) },
+        { label: "Email", value: getFirstDefined(user.email, currentUser?.email) },
+      ].filter((field) => field.value),
+    [currentUser, displayName, user.email, user.phone, user.phoneNumber, user.phone_number],
+  );
   const ownerProfileId = getFirstDefined(currentUser?.owner_id, currentUser?.ownerId);
   const netTone = snapshot.netProfit >= 0 ? "text-emerald-700" : "text-red-700";
+  const financialMetrics = useMemo(
+    () => [
+      { label: "Monthly commitment", value: formatMoney(snapshot.monthlyCommitment) },
+      { label: "Total paid", value: formatMoney(snapshot.totalPaid) },
+      { label: "Total dividend", value: formatMoney(snapshot.totalDividend) },
+      { label: "Total received", value: formatMoney(snapshot.totalReceived) },
+      { label: "Net profit", tone: netTone, value: formatMoney(snapshot.netProfit) },
+    ],
+    [netTone, snapshot.monthlyCommitment, snapshot.netProfit, snapshot.totalDividend, snapshot.totalPaid, snapshot.totalReceived],
+  );
+  const statCards = useMemo(
+    () => [
+      { label: "Total chits", value: snapshot.totalChits },
+      { label: "Active / Completed", value: `${snapshot.activeCount} / ${snapshot.completedCount}` },
+      { label: "Won / Not won", value: `${snapshot.wonCount} / ${snapshot.notWonCount}` },
+      ...(ownerProfileId ? [{ label: "Owner profile ID", value: ownerProfileId }] : []),
+    ],
+    [ownerProfileId, snapshot.activeCount, snapshot.completedCount, snapshot.notWonCount, snapshot.totalChits, snapshot.wonCount],
+  );
+
+  if (loading) {
+    return <PageLoadingState description="Loading account and financial snapshot." label="Loading profile..." />;
+  }
 
   return (
     <main className="page-shell">
@@ -163,50 +179,18 @@ export default function ProfilePage() {
       <section className="panel">
         <h2>Financial snapshot</h2>
         <div className="panel-grid mt-4 md:grid-cols-5">
-          <article className="panel">
-            <p className="text-sm uppercase tracking-wide text-slate-500">Monthly commitment</p>
-            <h3>{formatMoney(snapshot.monthlyCommitment)}</h3>
-          </article>
-          <article className="panel">
-            <p className="text-sm uppercase tracking-wide text-slate-500">Total paid</p>
-            <h3>{formatMoney(snapshot.totalPaid)}</h3>
-          </article>
-          <article className="panel">
-            <p className="text-sm uppercase tracking-wide text-slate-500">Total dividend</p>
-            <h3>{formatMoney(snapshot.totalDividend)}</h3>
-          </article>
-          <article className="panel">
-            <p className="text-sm uppercase tracking-wide text-slate-500">Total received</p>
-            <h3>{formatMoney(snapshot.totalReceived)}</h3>
-          </article>
-          <article className="panel">
-            <p className="text-sm uppercase tracking-wide text-slate-500">Net profit</p>
-            <h3 className={netTone}>{formatMoney(snapshot.netProfit)}</h3>
-          </article>
+          {financialMetrics.map((metric) => (
+            <MetricCard key={metric.label} label={metric.label} tone={metric.tone} value={metric.value} />
+          ))}
         </div>
       </section>
 
       <section className="panel">
         <h2>Stats</h2>
         <div className="panel-grid mt-4 md:grid-cols-4">
-          <article className="panel">
-            <h3>{snapshot.totalChits}</h3>
-            <p>Total chits</p>
-          </article>
-          <article className="panel">
-            <h3>{snapshot.activeCount} / {snapshot.completedCount}</h3>
-            <p>Active / Completed</p>
-          </article>
-          <article className="panel">
-            <h3>{snapshot.wonCount} / {snapshot.notWonCount}</h3>
-            <p>Won / Not won</p>
-          </article>
-          {ownerProfileId ? (
-            <article className="panel">
-              <h3>{ownerProfileId}</h3>
-              <p>Owner profile ID</p>
-            </article>
-          ) : null}
+          {statCards.map((stat) => (
+            <StatCard key={stat.label} label={stat.label} value={stat.value} />
+          ))}
         </div>
       </section>
 

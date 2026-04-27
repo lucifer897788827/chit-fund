@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { FormField, FormFrame } from "../../components/form-primitives";
+import { PageLoadingState } from "../../components/page-state";
 import { useSignedInShellHeader } from "../../components/signed-in-shell";
 import { toast } from "../../hooks/use-toast";
 import { getApiErrorMessage } from "../../lib/api-error";
@@ -878,8 +879,31 @@ export default function AuctionRoomPage({ embedded = false, sessionId: sessionId
       return;
     }
 
+    const previousRoom = room;
+    const optimisticActivityId = `self-bid-${room.sessionId}-${room.myMembershipId}-${amount}-optimistic`;
+    const placedAt = new Date().toISOString();
     setSubmitting(true);
-    setFeedback({ type: "", text: "" });
+    setFeedback({ type: "success", text: isBlindMode ? "Submitting your bid..." : `Submitting ${formatCurrencyAmount(amount)}...` });
+    setRoom((currentRoom) => ({
+      ...currentRoom,
+      myLastBid: amount,
+      myBidCount:
+        currentRoom.myBidCount != null && Number.isFinite(Number(currentRoom.myBidCount))
+          ? Number(currentRoom.myBidCount) + 1
+          : currentRoom.myBidCount,
+      myRemainingBidCapacity:
+        currentRoom.myRemainingBidCapacity != null && Number.isFinite(Number(currentRoom.myRemainingBidCapacity))
+          ? Math.max(Number(currentRoom.myRemainingBidCapacity) - 1, 0)
+          : currentRoom.myRemainingBidCapacity,
+    }));
+    if (!isBlindMode && !isFixedMode) {
+      pushLiveActivity({
+        id: optimisticActivityId,
+        label: `Your bid ${formatCurrencyAmount(amount)}`,
+        detail: "Syncing with the auction room.",
+        placedAt,
+      });
+    }
     try {
       const bid = await submitBid(room.sessionId, {
         membershipId: room.myMembershipId,
@@ -905,7 +929,7 @@ export default function AuctionRoomPage({ embedded = false, sessionId: sessionId
       });
       if (!isBlindMode && !isFixedMode) {
         pushLiveActivity({
-          id: `self-bid-${bid.bidId ?? bid.placedAt}`,
+          id: optimisticActivityId,
           label: `Your bid ${formatCurrencyAmount(amount)}`,
           detail: "Submitted from this device.",
           placedAt: bid.placedAt,
@@ -963,6 +987,8 @@ export default function AuctionRoomPage({ embedded = false, sessionId: sessionId
       if (!isActiveRef.current || latestSessionIdRef.current !== requestedSessionId) {
         return;
       }
+      setRoom(previousRoom);
+      setLiveActivity((currentEntries) => currentEntries.filter((entry) => entry.id !== optimisticActivityId));
       setFeedback({
         type: "error",
         text: getApiErrorMessage(submitError, { fallbackMessage: "Unable to place bid." }),
@@ -1064,9 +1090,7 @@ export default function AuctionRoomPage({ embedded = false, sessionId: sessionId
   const content = (
     <main className={embedded ? "auction-room" : "page-shell auction-room"}>
       {loading ? (
-        <section className="panel">
-          <p>Loading...</p>
-        </section>
+        <PageLoadingState description="Preparing the latest room snapshot and live bid feed." label="Loading auction room..." />
       ) : null}
       {!loading && room.sessionId ? (
         <>
@@ -1078,7 +1102,7 @@ export default function AuctionRoomPage({ embedded = false, sessionId: sessionId
                 <span className="auction-chip">{auctionPhaseLabel}</span>
               </div>
               <button className="action-button auction-refresh-button" disabled={refreshing} onClick={handleRefresh} type="button">
-                {refreshing ? "Loading..." : "Refresh auction room"}
+                {refreshing ? "Refreshing..." : "Refresh auction room"}
               </button>
             </div>
 
@@ -1323,7 +1347,7 @@ export default function AuctionRoomPage({ embedded = false, sessionId: sessionId
 
                 <div className="auction-mobile-cta">
                   <button className="action-button auction-submit-button" disabled={submitDisabled} type="submit">
-                    {submitting ? "Loading..." : "Submit Bid"}
+                    {submitting ? "Submitting..." : "Submit Bid"}
                   </button>
                 </div>
               </form>

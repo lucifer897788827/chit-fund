@@ -1163,7 +1163,7 @@ export default function OwnerDashboard() {
                 }
               >
                 <button className="action-button" disabled={creatingAuctionSession} type="submit">
-                  {creatingAuctionSession ? "Loading..." : "Create auction session"}
+                  {creatingAuctionSession ? "Creating..." : "Create auction session"}
                 </button>
               </FormActions>
             </form>

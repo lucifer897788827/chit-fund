@@ -13,8 +13,10 @@ import {
 test("renders a loading state with a label and description", () => {
   render(<PageLoadingState label="Loading groups..." description="Fetching the latest group list." />);
 
-  expect(screen.getByText("Loading groups...")).toBeInTheDocument();
-  expect(screen.getByText("Fetching the latest group list.")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading groups..." })).toBeInTheDocument();
+  expect(screen.queryByText("Loading groups...")).not.toBeInTheDocument();
+  expect(screen.queryByText("Fetching the latest group list.")).not.toBeInTheDocument();
+  expect(document.querySelectorAll(".skeleton-card").length).toBeGreaterThan(0);
 });
 
 test("renders a section empty state with an action button", async () => {
@@ -78,7 +80,8 @@ test("switches between loading, empty, and content in async section state", () =
     </AsyncSectionState>,
   );
 
-  expect(screen.getByText("Loading records...")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading records..." })).toBeInTheDocument();
+  expect(screen.queryByText("Loading records...")).not.toBeInTheDocument();
   expect(screen.queryByText("Nothing to show")).not.toBeInTheDocument();
   expect(screen.queryByText("Rendered content")).not.toBeInTheDocument();
 
@@ -139,6 +142,7 @@ test("renders section loading state with section-scoped copy", () => {
     />,
   );
 
-  expect(screen.getByText("Loading payment history...")).toBeInTheDocument();
-  expect(screen.getByText("Fetching the latest payment entries for this panel.")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading payment history..." })).toBeInTheDocument();
+  expect(screen.queryByText("Loading payment history...")).not.toBeInTheDocument();
+  expect(screen.queryByText("Fetching the latest payment entries for this panel.")).not.toBeInTheDocument();
 });

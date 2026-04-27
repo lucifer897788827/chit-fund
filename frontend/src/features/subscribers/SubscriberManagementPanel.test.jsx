@@ -45,7 +45,7 @@ test("loads subscribers and creates a new subscriber without leaving the list", 
 
   render(<SubscriberManagementPanel ownerId={17} />);
 
-  expect(screen.getByText(/Loading subscribers/i)).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading subscribers..." })).toBeInTheDocument();
   expect(await screen.findByRole("heading", { name: "Subscribers" })).toBeInTheDocument();
 
   await user.type(screen.getByLabelText("Full name"), "Leela");

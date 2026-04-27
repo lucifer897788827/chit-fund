@@ -6,6 +6,9 @@ from app.core.security import CurrentUser
 from app.models.auction import AuctionResult
 from app.models.chit import GroupMembership, MembershipSlot
 from app.models.money import Payment, Payout
+from app.modules.admin.service import build_admin_system_health
+from app.modules.reporting.service import get_owner_dashboard_report
+from app.modules.subscribers.service import get_subscriber_dashboard
 
 
 def get_my_financial_summary(db: Session, current_user: CurrentUser) -> dict:
@@ -50,4 +53,32 @@ def get_my_financial_summary(db: Session, current_user: CurrentUser) -> dict:
         "total_received": total_received_value,
         "dividend": dividend_value,
         "net": total_received_value + dividend_value - total_paid_value,
+    }
+
+
+def _dashboard_role(current_user: CurrentUser) -> str:
+    if current_user.user.role == "admin":
+        return "admin"
+    if current_user.owner is not None:
+        return "owner"
+    if current_user.subscriber is not None:
+        return "subscriber"
+    return current_user.user.role
+
+
+def get_my_dashboard(db: Session, current_user: CurrentUser) -> dict:
+    role = _dashboard_role(current_user)
+    stats: dict = {}
+
+    if role == "admin":
+        stats["admin_summary"] = build_admin_system_health(db, current_user)
+    if current_user.owner is not None:
+        stats["owner_dashboard"] = get_owner_dashboard_report(db, current_user)
+    if current_user.subscriber is not None:
+        stats["subscriber_dashboard"] = get_subscriber_dashboard(db, current_user)
+
+    return {
+        "role": role,
+        "financial_summary": get_my_financial_summary(db, current_user),
+        "stats": stats,
     }

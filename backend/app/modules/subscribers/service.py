@@ -55,11 +55,6 @@ def create_subscriber(db: Session, payload, current_user: CurrentUser | None = N
 
 def get_subscriber_dashboard(db: Session, current_user: CurrentUser) -> dict:
     subscriber = require_subscriber(current_user)
-    if current_user.owner is not None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Subscriber-only access required",
-        )
 
     membership_rows = db.execute(
         select(GroupMembership, ChitGroup)

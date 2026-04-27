@@ -54,6 +54,7 @@ async def delete_subscriber_endpoint(
     return soft_delete_subscriber(db, subscriber_id, current_user)
 
 
+# Deprecated endpoint: prefer GET /api/users/me/dashboard for role-aware dashboard data.
 @router.get("/dashboard", response_model=SubscriberDashboardResponse)
 async def get_subscriber_dashboard_endpoint(
     db: Session = Depends(get_db),

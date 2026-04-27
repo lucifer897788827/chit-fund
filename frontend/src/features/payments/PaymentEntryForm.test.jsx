@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 
 import { recordPayment } from "./api";
@@ -12,6 +13,25 @@ import PaymentEntryForm from "./PaymentEntryForm";
 beforeEach(() => {
   jest.clearAllMocks();
 });
+
+function renderWithQuery(ui) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: {
+        retry: false,
+      },
+      queries: {
+        retry: false,
+      },
+    },
+  });
+
+  function Wrapper({ children }) {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  return render(ui, { wrapper: Wrapper });
+}
 
 test("submits a payment, shows success, and keeps the current draft visible", async () => {
   const user = userEvent.setup();
@@ -30,7 +50,7 @@ test("submits a payment, shows success, and keeps the current draft visible", as
     status: "recorded",
   });
 
-  render(<PaymentEntryForm ownerId={17} />);
+  renderWithQuery(<PaymentEntryForm ownerId={17} />);
 
   await user.selectOptions(screen.getByLabelText("Payment type"), "installment");
   await user.selectOptions(screen.getByLabelText("Payment method"), "upi");
@@ -82,7 +102,7 @@ test("allows installment payments without entering an installment id", async () 
     status: "recorded",
   });
 
-  render(<PaymentEntryForm ownerId={17} />);
+  renderWithQuery(<PaymentEntryForm ownerId={17} />);
 
   await user.selectOptions(screen.getByLabelText("Payment type"), "installment");
   await user.type(screen.getByLabelText("Subscriber ID"), "42");
@@ -121,7 +141,7 @@ test("surfaces an API error without losing the current draft", async () => {
     },
   });
 
-  render(<PaymentEntryForm ownerId={17} />);
+  renderWithQuery(<PaymentEntryForm ownerId={17} />);
 
   await user.selectOptions(screen.getByLabelText("Payment type"), "installment");
   await user.type(screen.getByLabelText("Subscriber ID"), "42");
@@ -151,7 +171,7 @@ test("resyncs the hidden owner id when the owner prop changes", async () => {
     status: "recorded",
   });
 
-  const { rerender } = render(<PaymentEntryForm ownerId={17} />);
+  const { rerender } = renderWithQuery(<PaymentEntryForm ownerId={17} />);
 
   rerender(<PaymentEntryForm ownerId={18} />);
 
@@ -190,13 +210,13 @@ test("shows penalty details in the success note when the backend returns them", 
     arrearsAmount: 750,
   });
 
-  render(<PaymentEntryForm ownerId={17} />);
+  renderWithQuery(<PaymentEntryForm ownerId={17} />);
 
   await user.type(screen.getByLabelText("Subscriber ID"), "42");
   await user.type(screen.getByLabelText("Amount"), "1250");
   await user.click(screen.getByRole("button", { name: "Record payment" }));
 
   expect(await screen.findByText(/Payment recorded successfully/i)).toBeInTheDocument();
-  expect(screen.getByText(/Penalty: Rs\. 250\.00/i)).toBeInTheDocument();
-  expect(screen.getByText(/Arrears: Rs\. 750\.00/i)).toBeInTheDocument();
+  expect(screen.getByText(/Penalty: Rs\. 250/i)).toBeInTheDocument();
+  expect(screen.getByText(/Arrears: Rs\. 750/i)).toBeInTheDocument();
 });

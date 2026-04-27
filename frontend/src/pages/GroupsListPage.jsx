@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
 import { PageErrorState, PageLoadingState } from "../components/page-state";
 import { useAppShellHeader } from "../components/app-shell";
 import { getApiErrorMessage } from "../lib/api-error";
 import { getCurrentUser, sessionHasRole } from "../lib/auth/store";
-import { fetchOwnerDashboard, fetchSubscriberDashboard } from "../features/dashboard/api";
+import {
+  fetchUserDashboard,
+  getOwnerDashboardFromUserDashboard,
+  getSubscriberDashboardFromUserDashboard,
+} from "../features/dashboard/api";
 import { fetchPublicChits, requestGroupMembership, searchChitsByCode } from "../features/auctions/api";
 import { formatMoney } from "../features/payments/balances";
 
@@ -46,70 +51,109 @@ function normalizeMemberGroup(membership) {
   };
 }
 
+const UserGroupCard = memo(function UserGroupCard({ group }) {
+  return (
+    <article className="panel">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <span className="status-badge">{group.role}</span>
+        {group.membershipStatus ? <span className="status-badge status-badge--success">{titleCase(group.membershipStatus)}</span> : null}
+      </div>
+      <h3 className="mt-3">{group.title}</h3>
+      <p>
+        {group.groupCode} · Cycle {group.currentCycleNo ?? "N/A"}
+      </p>
+      {group.installmentAmount ? <p>Installment {formatMoney(group.installmentAmount)}</p> : null}
+      <Link className="action-button" to={`/groups/${group.id}`}>
+        Open group
+      </Link>
+    </article>
+  );
+});
+
+const JoinableGroupCard = memo(function JoinableGroupCard({ feedback, group, onRequestJoin, requesting }) {
+  return (
+    <article className="panel">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h3>{group.title}</h3>
+        {group.visibility ? <span className="status-badge">{titleCase(group.visibility)}</span> : null}
+      </div>
+      <p>{group.groupCode}</p>
+      <p>{formatMoney(group.chitValue)} chit value</p>
+      <button className="action-button" disabled={requesting} onClick={() => onRequestJoin(group)} type="button">
+        {requesting ? "Requesting..." : "Request to join"}
+      </button>
+      {feedback ? <p>{feedback}</p> : null}
+    </article>
+  );
+});
+
 export default function GroupsListPage() {
+  const queryClient = useQueryClient();
   const currentUser = getCurrentUser();
   const isOwner = sessionHasRole(currentUser, "owner");
-  const [ownerGroups, setOwnerGroups] = useState([]);
-  const [memberGroups, setMemberGroups] = useState([]);
-  const [publicGroups, setPublicGroups] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [codeResults, setCodeResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [feedbackByGroupId, setFeedbackByGroupId] = useState({});
   const [requestingGroupId, setRequestingGroupId] = useState(null);
+  const requestJoinMutation = useMutation({
+    mutationFn: (group) => requestGroupMembership(group.id),
+    onMutate: async (group) => {
+      const previousFeedback = feedbackByGroupId[group.id];
+      setRequestingGroupId(group.id);
+      setFeedbackByGroupId((current) => ({
+        ...current,
+        [group.id]: "Membership request submitted.",
+      }));
+      return { groupId: group.id, previousFeedback };
+    },
+    onError: (requestError, _group, context) => {
+      if (!context?.groupId) {
+        return;
+      }
+      setFeedbackByGroupId((current) => ({
+        ...current,
+        [context.groupId]: getApiErrorMessage(requestError, { fallbackMessage: "Unable to request membership." }),
+      }));
+    },
+    onSettled: (_data, _error, group) => {
+      setRequestingGroupId(null);
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      if (group?.id) {
+        setCodeResults((currentResults) => currentResults.map((item) => (item.id === group.id ? { ...item } : item)));
+      }
+    },
+  });
 
   useAppShellHeader({
     title: "Groups",
     contextLabel: isOwner ? "Owned groups and member groups" : "Memberships and public groups",
   });
 
-  useEffect(() => {
-    let active = true;
-    const loads = [
-      fetchSubscriberDashboard().then((data) => {
-        if (active) {
-          setMemberGroups((data?.memberships ?? []).map(normalizeMemberGroup));
-        }
-      }),
-      fetchPublicChits().then((data) => {
-        if (active) {
-          setPublicGroups(Array.isArray(data) ? data : []);
-        }
-      }),
-    ];
-
-    if (isOwner) {
-      loads.push(
-        fetchOwnerDashboard().then((data) => {
-          if (active) {
-            setOwnerGroups((data?.groups ?? []).map(normalizeOwnerGroup));
-          }
-        }),
-      );
-    }
-
-    Promise.allSettled(loads)
-      .then((results) => {
-        if (!active) {
-          return;
-        }
-        const failed = results.find((result) => result.status === "rejected");
-        if (failed) {
-          setError(getApiErrorMessage(failed.reason, { fallbackMessage: "Unable to load groups right now." }));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [isOwner]);
+  const dashboardQuery = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: fetchUserDashboard,
+    staleTime: 30_000,
+  });
+  const publicGroupsQuery = useQuery({
+    queryKey: ["groups", "public"],
+    queryFn: fetchPublicChits,
+    staleTime: 30_000,
+  });
+  const dashboardData = dashboardQuery.data;
+  const ownerGroups = useMemo(
+    () => (isOwner ? (getOwnerDashboardFromUserDashboard(dashboardData)?.groups ?? []).map(normalizeOwnerGroup) : []),
+    [dashboardData, isOwner],
+  );
+  const memberGroups = useMemo(
+    () => (getSubscriberDashboardFromUserDashboard(dashboardData)?.memberships ?? []).map(normalizeMemberGroup),
+    [dashboardData],
+  );
+  const publicGroups = Array.isArray(publicGroupsQuery.data) ? publicGroupsQuery.data : [];
+  const loading = dashboardQuery.isLoading || publicGroupsQuery.isLoading;
+  const errorSource = dashboardQuery.error ?? publicGroupsQuery.error;
+  const error = errorSource ? getApiErrorMessage(errorSource, { fallbackMessage: "Unable to load groups right now." }) : "";
 
   const visibleGroups = useMemo(() => {
     const seen = new Set();
@@ -139,21 +183,9 @@ export default function GroupsListPage() {
     }
   }
 
-  async function handleRequestJoin(group) {
-    setRequestingGroupId(group.id);
-    setFeedbackByGroupId((current) => ({ ...current, [group.id]: "" }));
-    try {
-      await requestGroupMembership(group.id);
-      setFeedbackByGroupId((current) => ({ ...current, [group.id]: "Membership request submitted." }));
-    } catch (requestError) {
-      setFeedbackByGroupId((current) => ({
-        ...current,
-        [group.id]: getApiErrorMessage(requestError, { fallbackMessage: "Unable to request membership." }),
-      }));
-    } finally {
-      setRequestingGroupId(null);
-    }
-  }
+  const handleRequestJoin = useCallback((group) => {
+    requestJoinMutation.mutate(group);
+  }, [requestJoinMutation]);
 
   if (loading) {
     return <PageLoadingState description="Loading owned, joined, and public groups." label="Loading groups..." />;
@@ -195,20 +227,7 @@ export default function GroupsListPage() {
         {visibleGroups.length > 0 ? (
           <div className="panel-grid md:grid-cols-2">
             {visibleGroups.map((group) => (
-              <article className="panel" key={group.id}>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <span className="status-badge">{group.role}</span>
-                  {group.membershipStatus ? <span className="status-badge status-badge--success">{titleCase(group.membershipStatus)}</span> : null}
-                </div>
-                <h3 className="mt-3">{group.title}</h3>
-                <p>
-                  {group.groupCode} · Cycle {group.currentCycleNo ?? "N/A"}
-                </p>
-                {group.installmentAmount ? <p>Installment {formatMoney(group.installmentAmount)}</p> : null}
-                <Link className="action-button" to={`/groups/${group.id}`}>
-                  Open group
-                </Link>
-              </article>
+              <UserGroupCard group={group} key={group.id} />
             ))}
           </div>
         ) : null}
@@ -232,20 +251,13 @@ export default function GroupsListPage() {
         {codeResults.length > 0 ? (
           <div className="panel-grid mt-4 md:grid-cols-2">
             {codeResults.map((group) => (
-              <article className="panel" key={`${group.id}-${group.groupCode}`}>
-                <h3>{group.title}</h3>
-                <p>{group.groupCode}</p>
-                <p>{formatMoney(group.chitValue)} chit value</p>
-                <button
-                  className="action-button"
-                  disabled={requestingGroupId === group.id}
-                  onClick={() => handleRequestJoin(group)}
-                  type="button"
-                >
-                  {requestingGroupId === group.id ? "Requesting..." : "Request to join"}
-                </button>
-                {feedbackByGroupId[group.id] ? <p>{feedbackByGroupId[group.id]}</p> : null}
-              </article>
+              <JoinableGroupCard
+                feedback={feedbackByGroupId[group.id]}
+                group={group}
+                key={`${group.id}-${group.groupCode}`}
+                onRequestJoin={handleRequestJoin}
+                requesting={requestingGroupId === group.id}
+              />
             ))}
           </div>
         ) : null}
@@ -262,23 +274,13 @@ export default function GroupsListPage() {
         {publicGroups.length > 0 ? (
           <div className="panel-grid md:grid-cols-2">
             {publicGroups.map((group) => (
-              <article className="panel" key={group.id}>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <h3>{group.title}</h3>
-                  <span className="status-badge">{titleCase(group.visibility)}</span>
-                </div>
-                <p>{group.groupCode}</p>
-                <p>{formatMoney(group.chitValue)} chit value</p>
-                <button
-                  className="action-button"
-                  disabled={requestingGroupId === group.id}
-                  onClick={() => handleRequestJoin(group)}
-                  type="button"
-                >
-                  {requestingGroupId === group.id ? "Requesting..." : "Request to join"}
-                </button>
-                {feedbackByGroupId[group.id] ? <p>{feedbackByGroupId[group.id]}</p> : null}
-              </article>
+              <JoinableGroupCard
+                feedback={feedbackByGroupId[group.id]}
+                group={group}
+                key={group.id}
+                onRequestJoin={handleRequestJoin}
+                requesting={requestingGroupId === group.id}
+              />
             ))}
           </div>
         ) : null}

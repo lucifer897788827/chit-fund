@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { fetchSubscriberDashboard } from "./api";
+import { fetchUserDashboard, getSubscriberDashboardFromUserDashboard } from "./api";
 import { PageErrorState, PageLoadingState } from "../../components/page-state";
 import { useSignedInShellHeader } from "../../components/signed-in-shell";
 import { getApiErrorMessage } from "../../lib/api-error";
@@ -135,8 +135,8 @@ export default function SubscriberDashboard() {
   const [submittingOwnerRequest, setSubmittingOwnerRequest] = useState(false);
 
   const loadDashboard = useCallback(async () => {
-    const data = await fetchSubscriberDashboard();
-    return normalizeSubscriberDashboard(data);
+    const data = await fetchUserDashboard();
+    return normalizeSubscriberDashboard(getSubscriberDashboardFromUserDashboard(data));
   }, []);
 
   useEffect(() => {

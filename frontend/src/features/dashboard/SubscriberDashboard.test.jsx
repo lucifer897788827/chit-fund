@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 jest.mock("./api", () => ({
-  fetchSubscriberDashboard: jest.fn(),
+  fetchUserDashboard: jest.fn(),
+  getSubscriberDashboardFromUserDashboard: jest.fn((data) => data?.stats?.subscriber_dashboard ?? {}),
 }));
 
 jest.mock("../auctions/api", () => ({
@@ -29,7 +30,7 @@ jest.mock("../owner-requests/api", () => ({
 }));
 
 import SubscriberDashboard from "./SubscriberDashboard";
-import { fetchSubscriberDashboard } from "./api";
+import { fetchUserDashboard, getSubscriberDashboardFromUserDashboard } from "./api";
 import {
   acceptGroupInvite,
   fetchPublicChits,
@@ -42,7 +43,26 @@ import { createOwnerRequest } from "../owner-requests/api";
 
 beforeEach(() => {
   jest.clearAllMocks();
+  getSubscriberDashboardFromUserDashboard.mockImplementation((data) => data?.stats?.subscriber_dashboard ?? {});
 });
+
+function userDashboard(subscriberDashboard) {
+  return {
+    role: "subscriber",
+    financial_summary: {},
+    stats: {
+      subscriber_dashboard: subscriberDashboard,
+    },
+  };
+}
+
+function mockUserDashboardResolvedValue(subscriberDashboard) {
+  fetchUserDashboard.mockResolvedValue(userDashboard(subscriberDashboard));
+}
+
+function mockUserDashboardResolvedValueOnce(subscriberDashboard) {
+  fetchUserDashboard.mockResolvedValueOnce(userDashboard(subscriberDashboard));
+}
 
 function renderDashboard() {
   return render(
@@ -65,7 +85,7 @@ test("renders a subscriber-first overview with membership balances, active aucti
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [
       {
@@ -164,7 +184,7 @@ test("shows strong empty states when the subscriber has no memberships, no live 
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [],
     activeAuctions: [],
@@ -187,7 +207,7 @@ test("renders the become organizer action for a subscriber", async () => {
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [],
     activeAuctions: [],
@@ -206,7 +226,7 @@ test("lets a subscriber request to join a public chit from the discovery list", 
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [],
     activeAuctions: [],
@@ -246,7 +266,7 @@ test("lets a subscriber search by group code and request to join a matching chit
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [],
     activeAuctions: [],
@@ -291,7 +311,7 @@ test("shows a pending join state for a public chit that is already awaiting appr
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [
       {
@@ -345,8 +365,8 @@ test("lets a subscriber accept and reject private-group invites", async () => {
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard
-    .mockResolvedValueOnce({
+  fetchUserDashboard
+    .mockResolvedValueOnce(userDashboard({
       subscriberId: 7,
       memberships: [
         {
@@ -397,8 +417,8 @@ test("lets a subscriber accept and reject private-group invites", async () => {
         },
       ],
       activeAuctions: [],
-    })
-    .mockResolvedValueOnce({
+    }))
+    .mockResolvedValueOnce(userDashboard({
       subscriberId: 7,
       memberships: [
         {
@@ -449,8 +469,8 @@ test("lets a subscriber accept and reject private-group invites", async () => {
         },
       ],
       activeAuctions: [],
-    })
-    .mockResolvedValueOnce({
+    }))
+    .mockResolvedValueOnce(userDashboard({
       subscriberId: 7,
       memberships: [
         {
@@ -478,7 +498,7 @@ test("lets a subscriber accept and reject private-group invites", async () => {
         },
       ],
       activeAuctions: [],
-    });
+    }));
   fetchPublicChits.mockResolvedValue([]);
   acceptGroupInvite.mockResolvedValue({
     membershipId: 61,
@@ -510,7 +530,7 @@ test("shows a pending owner request state after submit", async () => {
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [],
     activeAuctions: [],
@@ -535,7 +555,7 @@ test("maps non-open auction states into clearer membership status text", async (
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockResolvedValue({
+  mockUserDashboardResolvedValue({
     subscriberId: 7,
     memberships: [
       {
@@ -578,7 +598,7 @@ test("shows a sign-in message when there is no subscriber session", () => {
   renderDashboard();
 
   expect(screen.getByText(/Sign in as a subscriber to load your dashboard/i)).toBeInTheDocument();
-  expect(fetchSubscriberDashboard).not.toHaveBeenCalled();
+  expect(fetchUserDashboard).not.toHaveBeenCalled();
 });
 
 test("shows a load failure message when the dashboard request fails", async () => {
@@ -586,7 +606,7 @@ test("shows a load failure message when the dashboard request fails", async () =
     role: "subscriber",
     subscriberId: 7,
   });
-  fetchSubscriberDashboard.mockRejectedValue(new Error("network"));
+  fetchUserDashboard.mockRejectedValue(new Error("network"));
   fetchPublicChits.mockResolvedValue([]);
 
   renderDashboard();

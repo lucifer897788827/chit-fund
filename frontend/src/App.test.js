@@ -97,6 +97,21 @@ jest.mock("./features/dashboard/api", () => ({
       recentAuctionOutcomes: [],
     }),
   ),
+  fetchUserDashboard: jest.fn(() =>
+    Promise.resolve({
+      role: "subscriber",
+      financial_summary: {},
+      stats: {
+        subscriber_dashboard: {
+          memberships: [],
+          activeAuctions: [],
+          recentAuctionOutcomes: [],
+        },
+      },
+    }),
+  ),
+  getOwnerDashboardFromUserDashboard: jest.fn((data) => data?.stats?.owner_dashboard ?? {}),
+  getSubscriberDashboardFromUserDashboard: jest.fn((data) => data?.stats?.subscriber_dashboard ?? {}),
 }));
 
 jest.mock("./features/payments/api", () => ({
@@ -172,9 +187,10 @@ test("allows an owner session to reach the owner route", async () => {
   });
   window.history.pushState({}, "", "/owner");
 
-  render(<App />);
+  const { container } = render(<App />);
 
-  expect(await screen.findByRole("heading", { name: /Owner Dashboard/i })).toBeInTheDocument();
+  await screen.findByText(/Today in your chit fund workspace/i);
+  expect(container.querySelector(".signed-in-shell__title")).toHaveTextContent("Home");
 });
 
 test("blocks an owner-only session from the subscriber route", async () => {
@@ -186,10 +202,11 @@ test("blocks an owner-only session from the subscriber route", async () => {
   });
   window.history.pushState({}, "", "/subscriber");
 
-  render(<App />);
+  const { container } = render(<App />);
 
-  expect(await screen.findByRole("heading", { name: /Sign In/i })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: /My Managed Chits/i })).not.toBeInTheDocument();
+  await screen.findByText(/Today in your chit fund workspace/i);
+  expect(container.querySelector(".signed-in-shell__title")).toHaveTextContent("Home");
+  expect(screen.queryByRole("heading", { name: /Sign In/i })).not.toBeInTheDocument();
 });
 
 test("renders the notifications route for a signed-in user", async () => {

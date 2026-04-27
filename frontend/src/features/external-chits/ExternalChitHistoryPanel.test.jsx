@@ -16,7 +16,7 @@ test("renders loading, empty, and summary states for the ledger workspace", asyn
     />,
   );
 
-  expect(screen.getByText("Loading ledger workspace...")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading ledger workspace..." })).toBeInTheDocument();
 
   rerender(
     <ExternalChitHistoryPanel

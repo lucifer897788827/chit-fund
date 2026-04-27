@@ -78,7 +78,7 @@ test("loads the owner auction session summary and enables close/finalize when al
 
   render(<OwnerAuctionConsole sessionId={44} />);
 
-  expect(screen.getByText(/Loading auction console/i)).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Loading auction console..." })).toBeInTheDocument();
   expect(await screen.findByRole("heading", { name: /Auction Session 44/i })).toBeInTheDocument();
   expect(screen.getByText("July Chit")).toBeInTheDocument();
   expect(screen.getByText("JUL-001")).toBeInTheDocument();

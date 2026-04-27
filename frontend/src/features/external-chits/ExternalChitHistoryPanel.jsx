@@ -36,6 +36,10 @@ function SummaryCard({ label, value, detail, status = null }) {
   );
 }
 
+function SummaryValueSkeleton() {
+  return <span aria-hidden="true" className="skeleton-card block h-7 w-24 rounded-full bg-slate-200" />;
+}
+
 function OverrideBadge({ status }) {
   return (
     <span
@@ -297,22 +301,22 @@ export default function ExternalChitHistoryPanel({
         <SummaryCard
           detail={summaryLoading ? "Refreshing totals..." : "Total you contributed across saved months."}
           label="Total paid"
-          value={summaryLoading && !summary ? "Loading..." : formatAmount(summary?.totalPaid)}
+          value={summaryLoading && !summary ? <SummaryValueSkeleton /> : formatAmount(summary?.totalPaid)}
         />
         <SummaryCard
           detail="Share plus payout received from all saved months."
           label="Total received"
-          value={summaryLoading && !summary ? "Loading..." : formatAmount(summary?.totalReceived)}
+          value={summaryLoading && !summary ? <SummaryValueSkeleton /> : formatAmount(summary?.totalReceived)}
         />
         <SummaryCard
           detail="Net result from saved external-chit entries."
           label="Profit"
-          value={summaryLoading && !summary ? "Loading..." : formatAmount(summary?.profit)}
+          value={summaryLoading && !summary ? <SummaryValueSkeleton /> : formatAmount(summary?.profit)}
         />
         <SummaryCard
           detail={summary?.winningMonth ? "First saved self-win month." : "No self-win saved yet."}
           label="Winning month"
-          value={summaryLoading && !summary ? "Loading..." : summary?.winningMonth ? `Month ${summary.winningMonth}` : "Not yet"}
+          value={summaryLoading && !summary ? <SummaryValueSkeleton /> : summary?.winningMonth ? `Month ${summary.winningMonth}` : "Not yet"}
         />
       </div>
 
