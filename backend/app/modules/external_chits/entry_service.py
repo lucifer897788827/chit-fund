@@ -7,11 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.core.money import money_int, parse_whole_amount
 from app.core.pagination import PaginatedResponse, apply_pagination, build_paginated_response, count_statement, resolve_pagination
-from app.core.security import CurrentUser, require_subscriber
+from app.core.security import CurrentUser
 from app.models.external import ExternalChit, ExternalChitEntry
 from app.models.user import Subscriber
 from app.modules.external_chits.serializers import serialize_external_chit_entry
 from app.modules.external_chits.validation import validate_external_chit_monthly_entry_payload
+from app.modules.subscribers.service import ensure_subscriber_profile
 
 ALLOWED_EXTERNAL_CHIT_ENTRY_TYPES = {"due", "paid", "won", "penalty", "note"}
 
@@ -45,7 +46,7 @@ def _resolve_external_chit_entry_context(
     external_chit_id: int,
     current_user: CurrentUser,
 ) -> ExternalChitEntryContext:
-    current_subscriber = require_subscriber(current_user)
+    current_subscriber = ensure_subscriber_profile(db, current_user)
 
     external_chit = db.scalar(select(ExternalChit).where(ExternalChit.id == external_chit_id))
     if external_chit is None:

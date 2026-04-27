@@ -2,14 +2,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.money import money_int, money_int_or_none
-from app.core.security import CurrentUser, require_subscriber
+from app.core.security import CurrentUser
 from app.models.external import ExternalChit, ExternalChitEntry
+from app.modules.external_chits.access_control import require_external_chit_participant
 from app.modules.external_chits.crud_service import (
     create_external_chit as create_external_chit_record,
     delete_external_chit as delete_external_chit_record,
     list_external_chits as list_external_chit_records,
     update_external_chit as update_external_chit_record,
 )
+from app.modules.subscribers.service import ensure_subscriber_profile
 from app.modules.external_chits.entry_service import (
     create_external_chit_entry as create_external_chit_entry_record,
     list_external_chit_entries,
@@ -184,12 +186,12 @@ def list_external_chits(
     page: int | None = None,
     page_size: int | None = None,
 ):
-    subscriber = require_subscriber(current_user)
+    subscriber = ensure_subscriber_profile(db, current_user)
     return list_external_chit_records(db, current_user, subscriber.id, page=page, page_size=page_size)
 
 
 def create_external_chit(db: Session, payload, current_user: CurrentUser):
-    subscriber = require_subscriber(current_user)
+    subscriber = ensure_subscriber_profile(db, current_user)
     payload_data = {
         "subscriberId": subscriber.id,
         "title": payload.title,

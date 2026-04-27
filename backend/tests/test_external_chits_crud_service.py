@@ -3,17 +3,18 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.security import CurrentUser, hash_password
 from app.models.external import ExternalChit
 from app.models.user import Owner, Subscriber, User
 from app.modules.external_chits.crud_service import (
-    create_external_chit,
+    create_external_chit as create_external_chit_record,
     delete_external_chit,
     list_external_chits,
     update_external_chit,
 )
+from app.modules.external_chits.service import create_external_chit as create_external_chit_service
 
 
 def _owner_current_user(db_session, phone: str = "9999999999") -> CurrentUser:
@@ -97,7 +98,7 @@ def test_create_external_chit_rejects_foreign_subscriber_for_owner(app, db_sessi
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        create_external_chit(db_session, payload, current_user)
+        create_external_chit_record(db_session, payload, current_user)
 
     assert exc_info.value.status_code == 403
 
@@ -105,7 +106,7 @@ def test_create_external_chit_rejects_foreign_subscriber_for_owner(app, db_sessi
 def test_create_and_list_external_chits_are_scoped_to_current_subscriber(app, db_session):
     current_user = _subscriber_current_user(db_session)
 
-    created = create_external_chit(
+    created = create_external_chit_service(
         db_session,
         SimpleNamespace(
             subscriberId=current_user.subscriber.id,
@@ -249,3 +250,38 @@ def test_update_external_chit_can_mark_inactive(app, db_session):
     refreshed = db_session.scalar(select(ExternalChit).where(ExternalChit.id == target.id))
     assert refreshed is not None
     assert refreshed.status == "inactive"
+
+
+def test_owner_without_subscriber_profile_auto_creates_profile_for_external_chits(app, db_session):
+    owner_user = db_session.scalar(select(User).where(User.phone == "9999999999"))
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == owner_user.id)) if owner_user else None
+    owner_subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == owner_user.id)) if owner_user else None
+    assert owner_user is not None
+    assert owner is not None
+    assert owner_subscriber is not None
+
+    db_session.execute(delete(Subscriber).where(Subscriber.id == owner_subscriber.id))
+    db_session.commit()
+
+    current_user = CurrentUser(user=owner_user, owner=owner, subscriber=None)
+
+    created = create_external_chit_service(
+        db_session,
+        SimpleNamespace(
+            title="Auto Created Owner Chit",
+            organizerName="Ravi",
+            chitValue=100000,
+            installmentAmount=5000,
+            cycleFrequency="monthly",
+            startDate=date(2026, 5, 1),
+        ),
+        current_user,
+    )
+
+    created_subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == owner_user.id))
+    assert created_subscriber is not None
+    assert created_subscriber.auto_created is True
+    assert created_subscriber.owner_id == owner.id
+    assert current_user.subscriber is not None
+    assert current_user.subscriber.id == created_subscriber.id
+    assert created["subscriberId"] == created_subscriber.id

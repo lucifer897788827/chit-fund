@@ -46,6 +46,7 @@ class Subscriber(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     address_text: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="active")
+    auto_created: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class OwnerRequest(Base):

@@ -16,6 +16,7 @@ from app.models.auction import AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, CurrentMonthStatus, GroupMembership
 from app.models.money import LedgerEntry, Payout
 from app.models.user import Owner, Subscriber
+from app.modules.admin.cache import invalidate_admin_users_cache
 from app.modules.notifications.service import (
     dispatch_staged_notifications,
     notify_auction_finalized,
@@ -331,6 +332,7 @@ def ensure_auction_payout(
             "payout_expanded": bool(payout.payout_expanded),
         },
     )
+    invalidate_admin_users_cache()
     return payout, ledger_entry
 
 
@@ -513,6 +515,7 @@ def settle_owner_payout(
         },
     )
     db.commit()
+    invalidate_admin_users_cache()
     db.refresh(payout)
     db.refresh(ledger_entry)
     try:

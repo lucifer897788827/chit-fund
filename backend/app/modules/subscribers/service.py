@@ -9,6 +9,7 @@ from app.models.auction import AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, GroupMembership, membership_can_bid
 from app.models.user import Subscriber
 from app.modules.auctions.service import get_auction_state
+from app.modules.admin.cache import invalidate_admin_users_cache
 from app.modules.groups.slot_service import sync_membership_slot_state
 from app.modules.payments.installment_service import build_membership_dues_snapshot_map
 from app.modules.subscribers.auth_service import create_subscriber_user
@@ -16,6 +17,41 @@ from app.modules.subscribers.validation import validate_subscriber_creation
 
 
 MAX_RECENT_AUCTION_OUTCOMES = 5
+OWNER_PARTICIPANT_ROLES = {"owner", "chit_owner"}
+CHIT_PARTICIPANT_ROLES = {"subscriber", "owner", "chit_owner"}
+
+
+def ensure_subscriber_profile(db: Session, current_user: CurrentUser):
+    if current_user.user.role not in CHIT_PARTICIPANT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscriber profile required")
+
+    if current_user.subscriber is not None:
+        return current_user.subscriber
+
+    if current_user.owner is None or current_user.user.role not in OWNER_PARTICIPANT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscriber profile required")
+
+    owner = require_owner(current_user)
+    subscriber = db.scalar(select(Subscriber).where(Subscriber.user_id == current_user.user.id))
+    if subscriber is None:
+        display_name = owner.display_name.strip() if isinstance(owner.display_name, str) else ""
+        full_name = display_name or current_user.user.phone
+        subscriber = Subscriber(
+            user_id=current_user.user.id,
+            owner_id=owner.id,
+            full_name=full_name,
+            phone=current_user.user.phone,
+            email=current_user.user.email,
+            status="active",
+            auto_created=True,
+        )
+        db.add(subscriber)
+        db.commit()
+        db.refresh(subscriber)
+        invalidate_admin_users_cache()
+
+    current_user.subscriber = subscriber
+    return subscriber
 
 
 def create_subscriber(db: Session, payload, current_user: CurrentUser | None = None):
@@ -39,10 +75,12 @@ def create_subscriber(db: Session, payload, current_user: CurrentUser | None = N
         phone=context.phone,
         email=context.email,
         status="active",
+        auto_created=False,
     )
     db.add(subscriber)
     db.commit()
     db.refresh(subscriber)
+    invalidate_admin_users_cache()
     return {
         "id": subscriber.id,
         "ownerId": subscriber.owner_id,

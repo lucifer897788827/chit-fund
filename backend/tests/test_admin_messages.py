@@ -1,4 +1,5 @@
 import json
+import importlib
 
 from fastapi.testclient import TestClient
 
@@ -98,17 +99,22 @@ def test_admin_user_management_lists_and_reads_users(app, db_session):
     client = TestClient(app)
     headers = _admin_headers(client, db_session)
 
-    list_response = client.get("/api/admin/users", headers=headers)
+    list_response = client.get("/api/admin/users?page=1&limit=20", headers=headers)
     detail_response = client.get("/api/admin/users/1", headers=headers)
 
     assert list_response.status_code == 200
-    assert any(user["id"] == 1 and user["role"] == "chit_owner" for user in list_response.json())
+    list_body = list_response.json()
+    assert list_body["page"] == 1
+    assert list_body["pageSize"] == 20
+    assert list_body["totalCount"] >= 1
+    assert any(user["id"] == 1 and user["role"] == "owner" for user in list_body["items"])
     assert detail_response.status_code == 200
     body = detail_response.json()
     assert body["id"] == 1
-    assert body["role"] == "chit_owner"
-    assert "paymentBehavior" in body
-    assert "stats" in body
+    assert body["role"] == "owner"
+    assert "financialSummary" in body
+    assert "participationStats" in body
+    assert "paymentScore" in body["financialSummary"]
 
 
 def test_admin_user_listing_emits_performance_breakdown(app, db_session, capsys):
@@ -143,6 +149,67 @@ def test_admin_user_management_requires_admin(app):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Admin role required"
+
+
+def test_admin_user_listing_paginates(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    response = client.get("/api/admin/users?page=1&limit=1", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["page"] == 1
+    assert body["pageSize"] == 1
+    assert len(body["items"]) == 1
+
+
+def test_admin_user_listing_uses_cache(app, db_session, monkeypatch):
+    admin_service = importlib.import_module("app.modules.admin.service")
+    cache_module = importlib.import_module("app.modules.admin.cache")
+    store = {}
+
+    class _FakeRedis:
+        def get(self, key):
+            return store.get(key)
+
+        def set(self, key, value, ex=None):
+            store[key] = value
+            return True
+
+    monkeypatch.setattr(cache_module, "redis_client", _FakeRedis())
+    monkeypatch.setattr(admin_service, "load_admin_users_cache", cache_module.load_admin_users_cache)
+    monkeypatch.setattr(admin_service, "store_admin_users_cache", cache_module.store_admin_users_cache)
+
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    first_response = client.get("/api/admin/users?page=1&limit=20", headers=headers)
+
+    def fail_count_statement(*args, **kwargs):
+        raise AssertionError("cache miss unexpectedly hit count query")
+
+    monkeypatch.setattr(admin_service, "count_statement", fail_count_statement)
+
+    second_response = client.get("/api/admin/users?page=1&limit=20", headers=headers)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json() == first_response.json()
+
+
+def test_admin_user_detail_lite_mode_keeps_contract(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    response = client.get("/api/admin/users/1?lite=true", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 1
+    assert "financialSummary" in body
+    assert "participationStats" in body
+    assert body["financialSummary"]["paymentScore"] >= 0
 
 
 def test_admin_user_management_returns_404_for_missing_user(app, db_session):

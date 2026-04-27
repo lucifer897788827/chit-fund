@@ -62,6 +62,7 @@ def app(tmp_path):
             phone=owner_user.phone,
             email=owner_user.email,
             status="active",
+            auto_created=False,
         )
         db.add(owner_subscriber)
         db.flush()
@@ -82,6 +83,7 @@ def app(tmp_path):
             phone=subscriber_user.phone,
             email=subscriber_user.email,
             status="active",
+            auto_created=False,
         )
         db.add(subscriber)
         db.commit()

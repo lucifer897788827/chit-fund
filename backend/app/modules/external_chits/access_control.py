@@ -1,16 +1,31 @@
 from fastapi import HTTPException, status
 
-from app.core.security import CurrentUser, require_subscriber
+from app.core.security import CurrentUser
 from app.models.external import ExternalChit, ExternalChitEntry
 from app.models.user import Subscriber
 
+CHIT_PARTICIPANT_ROLES = {"subscriber", "owner", "chit_owner"}
+
+
+def is_chit_participant(current_user: CurrentUser) -> bool:
+    return current_user.user.role in CHIT_PARTICIPANT_ROLES and current_user.subscriber is not None
+
+
+def require_external_chit_participant(current_user: CurrentUser) -> Subscriber:
+    if not is_chit_participant(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="External chit participant access required",
+        )
+    return current_user.subscriber
+
 
 def require_external_chit_subscriber(current_user: CurrentUser) -> Subscriber:
-    return require_subscriber(current_user)
+    return require_external_chit_participant(current_user)
 
 
 def require_external_chit_subscriber_access(current_user: CurrentUser, subscriber_id: int) -> int:
-    current_subscriber = require_subscriber(current_user)
+    current_subscriber = require_external_chit_participant(current_user)
     if subscriber_id != current_subscriber.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -20,7 +35,7 @@ def require_external_chit_subscriber_access(current_user: CurrentUser, subscribe
 
 
 def require_external_chit_access(current_user: CurrentUser, external_chit: ExternalChit) -> ExternalChit:
-    current_subscriber = require_subscriber(current_user)
+    current_subscriber = require_external_chit_participant(current_user)
     if external_chit.subscriber_id != current_subscriber.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

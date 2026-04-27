@@ -8,6 +8,8 @@ from app.core.money import WHOLE_AMOUNT_ERROR, parse_whole_amount
 from app.core.security import CurrentUser, require_owner, require_subscriber
 from app.models.external import ExternalChit, ExternalChitEntry
 from app.models.user import Subscriber
+from app.modules.external_chits.access_control import CHIT_PARTICIPANT_ROLES, is_chit_participant
+from app.modules.subscribers.service import ensure_subscriber_profile
 
 ALLOWED_EXTERNAL_CHIT_STATUSES = {"active", "inactive", "deleted", "paused", "closed", "completed"}
 ALLOWED_EXTERNAL_CHIT_CYCLE_FREQUENCIES = {"weekly", "monthly", "quarterly", "yearly"}
@@ -449,7 +451,8 @@ def validate_external_chit_entry_update_payload(payload: Any) -> dict:
 
 
 def _require_subscriber_for_current_user(db: Session, current_user: CurrentUser, subscriber_id: int) -> Subscriber:
-    if current_user.owner is not None:
+    if current_user.owner is not None and current_user.user.role in CHIT_PARTICIPANT_ROLES:
+        ensure_subscriber_profile(db, current_user)
         owner = require_owner(current_user)
         subscriber = db.get(Subscriber, subscriber_id)
         if subscriber is None:
@@ -461,7 +464,7 @@ def _require_subscriber_for_current_user(db: Session, current_user: CurrentUser,
             )
         return subscriber
 
-    if current_user.subscriber is not None:
+    if is_chit_participant(current_user):
         current_subscriber = require_subscriber(current_user)
         if current_subscriber.id != subscriber_id:
             raise HTTPException(
@@ -470,7 +473,7 @@ def _require_subscriber_for_current_user(db: Session, current_user: CurrentUser,
             )
         return current_subscriber
 
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscriber profile required")
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="External chit participant access required")
 
 
 def require_external_chit_access(db: Session, current_user: CurrentUser, external_chit_id: int) -> ExternalChit:

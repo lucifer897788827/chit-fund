@@ -85,6 +85,7 @@ def bootstrap_database() -> None:
             phone=owner_user.phone,
             email=owner_user.email,
             status="active",
+            auto_created=False,
         )
         subscriber_profile = Subscriber(
             user_id=subscriber_user.id,
@@ -93,6 +94,7 @@ def bootstrap_database() -> None:
             phone=subscriber_user.phone,
             email=subscriber_user.email,
             status="active",
+            auto_created=False,
         )
         db.add_all([owner_profile, subscriber_profile])
         db.flush()

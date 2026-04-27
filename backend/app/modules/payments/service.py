@@ -11,6 +11,7 @@ from app.core.logging import APP_LOGGER_NAME
 from app.core.money import money_int
 from app.core.security import CurrentUser, require_owner
 from app.models.money import Payment
+from app.modules.admin.cache import invalidate_admin_users_cache
 from app.modules.notifications.service import (
     dispatch_staged_notifications,
     notify_payment_recorded,
@@ -211,6 +212,7 @@ def record_payment(db: Session, payload, current_user: CurrentUser):
         )
         raise
 
+    invalidate_admin_users_cache()
     db.refresh(payment)
     if updated_installment is not None:
         db.refresh(updated_installment)

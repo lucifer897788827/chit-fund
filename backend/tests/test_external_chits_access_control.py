@@ -88,7 +88,59 @@ def test_require_external_chit_subscriber_rejects_owner_without_subscriber_profi
         require_external_chit_subscriber(current_user)
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == "Subscriber profile required"
+    assert exc_info.value.detail == "External chit participant access required"
+
+
+def test_require_external_chit_subscriber_allows_owner_with_subscriber_profile(app, db_session):
+    from app.modules.external_chits.access_control import require_external_chit_subscriber
+
+    owner_user = db_session.scalar(select(User).where(User.phone == "9999999999"))
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == owner_user.id)) if owner_user else None
+    owner_subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == owner_user.id)) if owner_user else None
+    assert owner_user is not None
+    assert owner is not None
+    assert owner_subscriber is not None
+
+    current_user = CurrentUser(user=owner_user, owner=owner, subscriber=owner_subscriber)
+
+    result = require_external_chit_subscriber(current_user)
+
+    assert result is owner_subscriber
+
+
+def test_require_external_chit_subscriber_rejects_admin_even_with_subscriber_profile(app, db_session):
+    from app.modules.external_chits.access_control import require_external_chit_subscriber
+
+    owner_user = db_session.scalar(select(User).where(User.phone == "9999999999"))
+    owner_subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == owner_user.id)) if owner_user else None
+    assert owner_subscriber is not None
+    admin_user = User(
+        email="admin@example.com",
+        phone="9000000199",
+        password_hash=hash_password("adminpass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin_user)
+    db_session.flush()
+    admin_subscriber = Subscriber(
+        user_id=admin_user.id,
+        owner_id=owner_subscriber.owner_id,
+        full_name="Admin Subscriber",
+        phone=admin_user.phone,
+        email=admin_user.email,
+        status="active",
+    )
+    db_session.add(admin_subscriber)
+    db_session.commit()
+
+    current_user = CurrentUser(user=admin_user, owner=None, subscriber=admin_subscriber)
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_external_chit_subscriber(current_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "External chit participant access required"
 
 
 def test_require_external_chit_subscriber_access_allows_own_subscriber_id(app, db_session):

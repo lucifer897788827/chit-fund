@@ -31,6 +31,7 @@ from app.modules.notifications.service import (
     notify_password_reset_confirmed,
     notify_password_reset_requested,
 )
+from app.modules.admin.cache import invalidate_admin_users_cache
 from app.modules.subscribers.auth_service import create_subscriber_user
 from app.modules.subscribers.validation import validate_subscriber_creation
 
@@ -384,6 +385,7 @@ def signup_user(db: Session, payload) -> dict:
     refresh_token, refresh_token_expires_at = _issue_refresh_token(db, user.id)
     _cleanup_refresh_tokens(db)
     db.commit()
+    invalidate_admin_users_cache()
     return _build_token_response(db, user, refresh_token, refresh_token_expires_at)
 
 

@@ -5,7 +5,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.core.security import CurrentUser
+from app.core.security import CurrentUser, hash_password
 from app.models.external import ExternalChit, ExternalChitEntry
 from app.models.user import Subscriber, User, Owner
 
@@ -16,6 +16,16 @@ def _subscriber_current_user(db_session) -> CurrentUser:
     owner = db_session.scalar(select(Owner).where(Owner.id == subscriber.owner_id)) if subscriber else None
     assert user is not None
     assert subscriber is not None
+    return CurrentUser(user=user, owner=owner, subscriber=subscriber)
+
+
+def _owner_current_user(db_session) -> CurrentUser:
+    user = db_session.scalar(select(User).where(User.phone == "9999999999"))
+    subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == user.id)) if user else None
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == user.id)) if user else None
+    assert user is not None
+    assert subscriber is not None
+    assert owner is not None
     return CurrentUser(user=user, owner=owner, subscriber=subscriber)
 
 
@@ -134,6 +144,119 @@ def test_create_external_chit_entry_rejects_chit_not_owned_by_current_subscriber
         create_external_chit_entry(db_session, payload, current_user)
 
     assert exc_info.value.status_code == 403
+
+
+def test_create_external_chit_entry_allows_owner_participant(app, db_session):
+    from app.modules.external_chits.entry_service import create_external_chit_entry
+
+    current_user = _owner_current_user(db_session)
+    chit = _make_external_chit(db_session, subscriber_id=current_user.subscriber.id, title="Owner Chit")
+    db_session.commit()
+
+    payload = SimpleNamespace(
+        externalChitId=chit.id,
+        entryType="paid",
+        entryDate=date(2026, 4, 10),
+        amount=2500,
+        description="Owner payment",
+    )
+
+    result = create_external_chit_entry(db_session, payload, current_user)
+
+    assert result["externalChitId"] == chit.id
+    assert result["description"] == "Owner payment"
+
+
+def test_create_external_chit_entry_rejects_admin_even_with_subscriber_profile(app, db_session):
+    from app.modules.external_chits.entry_service import create_external_chit_entry
+
+    owner_user = db_session.scalar(select(User).where(User.phone == "9999999999"))
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == owner_user.id)) if owner_user else None
+    assert owner is not None
+    admin_user = User(
+        email="entry-admin@example.com",
+        phone="9000000188",
+        password_hash=hash_password("adminpass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin_user)
+    db_session.flush()
+    admin_subscriber = Subscriber(
+        user_id=admin_user.id,
+        owner_id=owner.id,
+        full_name="Entry Admin",
+        phone=admin_user.phone,
+        email=admin_user.email,
+        status="active",
+    )
+    db_session.add(admin_subscriber)
+    db_session.flush()
+    chit = _make_external_chit(db_session, subscriber_id=admin_subscriber.id, title="Admin Chit")
+    db_session.commit()
+
+    payload = SimpleNamespace(
+        externalChitId=chit.id,
+        entryType="paid",
+        entryDate=date(2026, 4, 10),
+        amount=2500,
+        description="Admin payment",
+    )
+
+    current_user = CurrentUser(user=admin_user, owner=None, subscriber=admin_subscriber)
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_external_chit_entry(db_session, payload, current_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Subscriber profile required"
+
+
+def test_owner_without_subscriber_profile_auto_creates_before_entry_access(app, db_session):
+    from app.modules.external_chits.entry_service import create_external_chit_entry
+
+    owner_user = db_session.scalar(select(User).where(User.phone == "9999999999"))
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == owner_user.id)) if owner_user else None
+    owner_subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == owner_user.id)) if owner_user else None
+    assert owner_user is not None
+    assert owner is not None
+    assert owner_subscriber is not None
+
+    chit = _make_external_chit(db_session, subscriber_id=owner_subscriber.id, title="Legacy Owner Chit")
+    db_session.delete(owner_subscriber)
+    db_session.commit()
+
+    recreated_subscriber = Subscriber(
+        user_id=owner_user.id,
+        owner_id=owner.id,
+        full_name="Owner One",
+        phone=owner_user.phone,
+        email=owner_user.email,
+        status="active",
+        auto_created=True,
+    )
+    db_session.add(recreated_subscriber)
+    db_session.commit()
+    db_session.refresh(recreated_subscriber)
+    chit.subscriber_id = recreated_subscriber.id
+    db_session.add(chit)
+    db_session.commit()
+
+    current_user = CurrentUser(user=owner_user, owner=owner, subscriber=None)
+    payload = SimpleNamespace(
+        externalChitId=chit.id,
+        entryType="paid",
+        entryDate=date(2026, 4, 10),
+        amount=2500,
+        description="Auto-created owner payment",
+    )
+
+    result = create_external_chit_entry(db_session, payload, current_user)
+
+    assert result["externalChitId"] == chit.id
+    refreshed_subscriber = db_session.scalar(select(Subscriber).where(Subscriber.user_id == owner_user.id))
+    assert refreshed_subscriber is not None
+    assert refreshed_subscriber.auto_created is True
 
 
 def test_create_external_chit_entry_rejects_invalid_entry_type(app, db_session):

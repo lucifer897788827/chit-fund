@@ -25,11 +25,40 @@ class AdminMessageResponse(BaseModel):
 
 class AdminUserSummaryResponse(BaseModel):
     id: int
+    role: str
+    phone: str
+    createdAt: datetime
+    totalChits: int
+    paymentScore: int
+
+
+class AdminUserFinancialSummaryResponse(BaseModel):
+    paymentCount: int
+    totalPaid: int
+    payoutCount: int
+    totalReceived: int
+    netCashflow: int
+    paymentScore: int
+
+
+class AdminUserParticipationStatsResponse(BaseModel):
+    totalChits: int
+    ownedChits: int
+    joinedChits: int
+    externalChits: int
+    membershipCount: int
+    activeMemberships: int
+    prizedMemberships: int
+
+
+class AdminUserDetailResponse(BaseModel):
+    id: int
     phone: str
     email: str | None = None
     role: str
+    createdAt: datetime
     isActive: bool
     ownerId: int | None = None
     subscriberId: int | None = None
-    paymentBehavior: dict
-    stats: dict
+    financialSummary: AdminUserFinancialSummaryResponse
+    participationStats: AdminUserParticipationStatsResponse

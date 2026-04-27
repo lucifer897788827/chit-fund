@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.pagination import PaginatedResponse
 from app.core.security import CurrentUser, get_current_user
-from app.modules.admin.schemas import AdminMessageCreate, AdminMessageResponse, AdminUserSummaryResponse
+from app.modules.admin.schemas import (
+    AdminMessageCreate,
+    AdminMessageResponse,
+    AdminUserDetailResponse,
+    AdminUserSummaryResponse,
+)
 from app.modules.admin.service import (
     build_admin_system_health,
     create_admin_message,
@@ -49,18 +55,22 @@ async def create_admin_message_endpoint(
     return create_admin_message(db, payload, current_user)
 
 
-@router.get("/api/admin/users", response_model=list[AdminUserSummaryResponse])
+@router.get("/api/admin/users", response_model=PaginatedResponse[AdminUserSummaryResponse])
 async def list_admin_users_endpoint(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=200),
+    lite: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    return list_admin_users(db, current_user)
+    return list_admin_users(db, current_user, page=page, limit=limit, lite=lite)
 
 
-@router.get("/api/admin/users/{user_id}", response_model=AdminUserSummaryResponse)
+@router.get("/api/admin/users/{user_id}", response_model=AdminUserDetailResponse)
 async def get_admin_user_endpoint(
     user_id: int,
+    lite: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    return get_admin_user(db, user_id, current_user)
+    return get_admin_user(db, user_id, current_user, lite=lite)
