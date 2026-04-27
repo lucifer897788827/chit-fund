@@ -6,9 +6,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.security import verify_password
-from app.models.user import Subscriber, User
+from app.models.user import Owner, Subscriber, User
 from app.modules.subscribers.auth_service import create_subscriber_user
-from app.modules.subscribers.service import create_subscriber
+from app.modules.subscribers.service import (
+    create_subscriber,
+    deactivate_admin_subscriber_profiles,
+    ensure_subscriber_profile,
+)
 
 
 def test_create_subscriber_user_requires_password():
@@ -57,3 +61,86 @@ def test_create_subscriber_hashes_password_and_supports_login(app, db_session):
     assert body["role"] == "subscriber"
     assert body["subscriber_id"] == subscriber.id
     assert body["has_subscriber_profile"] is True
+
+
+def test_ensure_subscriber_profile_rejects_admin_even_without_profile(app, db_session):
+    admin = User(
+        email="admin-profile@example.com",
+        phone="9000000104",
+        password_hash=create_subscriber_user.__globals__["hash_password"]("admin-pass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin)
+    db_session.commit()
+
+    current_user = type("CurrentUserLike", (), {"user": admin, "owner": None, "subscriber": None})()
+
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_subscriber_profile(db_session, current_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Admin cannot have subscriber profile"
+
+
+def test_ensure_subscriber_profile_rejects_admin_with_existing_profile(app, db_session):
+    owner = db_session.scalar(select(Owner).order_by(Owner.id.asc()))
+    assert owner is not None
+    admin = User(
+        email="admin-profile-2@example.com",
+        phone="9000000105",
+        password_hash=create_subscriber_user.__globals__["hash_password"]("admin-pass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin)
+    db_session.flush()
+    admin_subscriber = Subscriber(
+        user_id=admin.id,
+        owner_id=owner.id,
+        full_name="Admin Profile",
+        phone=admin.phone,
+        email=admin.email,
+        status="active",
+    )
+    db_session.add(admin_subscriber)
+    db_session.commit()
+
+    current_user = type("CurrentUserLike", (), {"user": admin, "owner": None, "subscriber": admin_subscriber})()
+
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_subscriber_profile(db_session, current_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Admin cannot have subscriber profile"
+
+
+def test_deactivate_admin_subscriber_profiles_marks_admin_rows_inactive(app, db_session):
+    owner = db_session.scalar(select(Owner).order_by(Owner.id.asc()))
+    assert owner is not None
+    admin = User(
+        email="admin-cleanup@example.com",
+        phone="9000000106",
+        password_hash=create_subscriber_user.__globals__["hash_password"]("admin-pass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin)
+    db_session.flush()
+    admin_subscriber = Subscriber(
+        user_id=admin.id,
+        owner_id=owner.id,
+        full_name="Admin Cleanup",
+        phone=admin.phone,
+        email=admin.email,
+        status="active",
+    )
+    db_session.add(admin_subscriber)
+    db_session.commit()
+
+    updated_count = deactivate_admin_subscriber_profiles(db_session)
+
+    db_session.refresh(admin_subscriber)
+
+    assert updated_count == 1
+    assert admin_subscriber.status == "inactive"

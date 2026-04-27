@@ -143,6 +143,7 @@ describe("apiClient refresh handling", () => {
   });
 
   test("uses the current local host for the backend fallback", () => {
+    delete process.env.REACT_APP_API_URL;
     delete process.env.REACT_APP_BACKEND_URL;
     setWindowLocation("http://127.0.0.1:4173/");
 
@@ -150,11 +151,12 @@ describe("apiClient refresh handling", () => {
     require("./client");
 
     expect(axiosModule.create).toHaveBeenCalledWith({
-      baseURL: "http://127.0.0.1:8000/api",
+      baseURL: "http://127.0.0.1:8011/api",
     });
   });
 
   test("uses the current network host for frontend dev ports", () => {
+    delete process.env.REACT_APP_API_URL;
     delete process.env.REACT_APP_BACKEND_URL;
     setWindowLocation("http://192.168.1.50:3000/");
 
@@ -162,7 +164,20 @@ describe("apiClient refresh handling", () => {
     require("./client");
 
     expect(axiosModule.create).toHaveBeenCalledWith({
-      baseURL: "http://192.168.1.50:8000/api",
+      baseURL: "http://192.168.1.50:8011/api",
+    });
+  });
+
+  test("prefers REACT_APP_API_URL when it is configured", () => {
+    process.env.REACT_APP_API_URL = "http://127.0.0.1:8011/";
+    delete process.env.REACT_APP_BACKEND_URL;
+    setWindowLocation("http://127.0.0.1:3000/");
+
+    const axiosModule = require("axios");
+    require("./client");
+
+    expect(axiosModule.create).toHaveBeenCalledWith({
+      baseURL: "http://127.0.0.1:8011/api",
     });
   });
 });

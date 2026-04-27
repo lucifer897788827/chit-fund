@@ -3,9 +3,24 @@ import axios from "axios";
 import { clearSession, getCurrentUser, getRefreshToken, updateSession } from "../auth/store";
 import { notifySessionExpired } from "../auth/session-events";
 
+const LOCAL_DEV_BACKEND_PORT = "8011";
+
+function normalizeBaseUrl(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().replace(/\/+$/, "");
+}
+
 function getBackendUrl() {
-  if (process.env.REACT_APP_BACKEND_URL) {
-    return process.env.REACT_APP_BACKEND_URL.trim().replace(/\/+$/, "");
+  const configuredApiUrl = normalizeBaseUrl(process.env.REACT_APP_API_URL);
+  if (configuredApiUrl) {
+    return configuredApiUrl;
+  }
+
+  const configuredBackendUrl = normalizeBaseUrl(process.env.REACT_APP_BACKEND_URL);
+  if (configuredBackendUrl) {
+    return configuredBackendUrl;
   }
 
   if (typeof window !== "undefined") {
@@ -13,7 +28,7 @@ function getBackendUrl() {
     const frontendPort = window.location.port;
     const isFrontendDevPort = frontendPort === "3000" || frontendPort === "4173";
     if (hostname === "localhost" || hostname === "127.0.0.1" || isFrontendDevPort) {
-      return `${window.location.protocol}//${hostname}:8000`;
+      return `${window.location.protocol}//${hostname}:${LOCAL_DEV_BACKEND_PORT}`;
     }
   }
 

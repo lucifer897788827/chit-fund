@@ -1,3 +1,4 @@
+import logging
 import hashlib
 import secrets
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.logging import APP_LOGGER_NAME
 from app.core.config import settings
 from app.core.time import utcnow
 from app.models.user import Owner, Subscriber, User
@@ -21,6 +23,7 @@ PASSWORD_RESET_TOKEN_TTL: Final = timedelta(minutes=30)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
+logger = logging.getLogger(APP_LOGGER_NAME)
 
 
 @dataclass(slots=True)
@@ -134,7 +137,26 @@ def require_owner(current_user: CurrentUser) -> Owner:
     return current_user.owner
 
 
+def forbid_admin_chit_participation(
+    current_user: CurrentUser,
+    *,
+    detail: str = "Admins cannot participate in chits",
+) -> None:
+    if current_user.user.role == "admin":
+        logger.warning(
+            "Admin attempted restricted action",
+            extra={
+                "event": "admin.restricted_action_attempt",
+                "user_id": current_user.user.id,
+                "role": current_user.user.role,
+                "detail": detail,
+            },
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
 def require_subscriber(current_user: CurrentUser) -> Subscriber:
+    forbid_admin_chit_participation(current_user)
     if current_user.subscriber is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscriber profile required")
     return current_user.subscriber

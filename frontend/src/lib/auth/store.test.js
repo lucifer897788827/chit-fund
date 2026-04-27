@@ -2,6 +2,7 @@ import {
   clearSession,
   getAccessToken,
   getCurrentUser,
+  getUserRoles,
   isAuthenticated,
   logout,
   saveSession,
@@ -146,4 +147,21 @@ test("clearSession remains available as an alias for logout", () => {
   clearSession();
 
   expect(getCurrentUser()).toBeNull();
+});
+
+test("treats admin as an exclusive role even when legacy owner or subscriber hints exist", () => {
+  const session = {
+    access_token: "token-admin",
+    role: "admin",
+    owner_id: 4,
+    subscriber_id: 7,
+    has_subscriber_profile: true,
+    user: {
+      roles: ["admin", "owner", "subscriber"],
+    },
+  };
+
+  saveSession(session);
+
+  expect(getUserRoles()).toEqual(["admin"]);
 });

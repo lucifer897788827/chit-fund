@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.core.security import CurrentUser
+from app.core.security import CurrentUser, hash_password
 from app.models.chit import ChitGroup, GroupMembership, Installment
 from app.models.money import Payment
 from app.models.user import Owner, Subscriber, User
@@ -19,6 +19,31 @@ def _owner_current_user(db_session, phone: str = "9999999999") -> CurrentUser:
     assert user is not None
     assert owner is not None
     return CurrentUser(user=user, owner=owner, subscriber=subscriber)
+
+
+def _admin_current_user(db_session) -> CurrentUser:
+    owner = db_session.scalar(select(Owner).order_by(Owner.id.asc()))
+    assert owner is not None
+    admin_user = User(
+        email="admin-payment@example.com",
+        phone="9000000102",
+        password_hash=hash_password("admin-pass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin_user)
+    db_session.flush()
+    admin_subscriber = Subscriber(
+        user_id=admin_user.id,
+        owner_id=owner.id,
+        full_name="Admin Payment",
+        phone=admin_user.phone,
+        email=admin_user.email,
+        status="active",
+    )
+    db_session.add(admin_subscriber)
+    db_session.commit()
+    return CurrentUser(user=admin_user, owner=None, subscriber=admin_subscriber)
 
 
 def _make_group(db_session, *, owner_id: int, group_code: str, installment_amount: float = 1000.0) -> ChitGroup:
@@ -101,6 +126,27 @@ def test_validate_payment_rejects_owner_mismatch(app, db_session):
         validate_payment_submission(db_session, payload, current_user)
 
     assert exc_info.value.status_code == 403
+
+
+def test_validate_payment_rejects_admin_even_with_subscriber_profile(app, db_session):
+    current_user = _admin_current_user(db_session)
+    payload = PaymentCreate(
+        ownerId=1,
+        subscriberId=current_user.subscriber.id,
+        membershipId=None,
+        installmentId=None,
+        paymentType="membership",
+        paymentMethod="upi",
+        amount=25000,
+        paymentDate=date(2026, 5, 10),
+        referenceNo="UPI-ADMIN-001",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        validate_payment_submission(db_session, payload, current_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Admins cannot participate in chits"
 
 
 def test_validate_payment_rejects_membership_subscriber_mismatch(app, db_session):

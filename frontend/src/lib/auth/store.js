@@ -138,8 +138,15 @@ function normalizeRoles(value) {
 
 export function getUserRoles(session = readSession()) {
   const explicitRoles = normalizeRoles(session?.user?.roles);
+  if (explicitRoles.includes("admin")) {
+    return ["admin"];
+  }
   if (explicitRoles.length > 0) {
     return explicitRoles;
+  }
+
+  if (session?.role === "admin") {
+    return ["admin"];
   }
 
   const legacyRoles = [];
@@ -154,9 +161,6 @@ export function getUserRoles(session = readSession()) {
   }
   if (session?.role === "chit_owner" || session?.role === "owner" || session?.owner_id || session?.ownerId) {
     legacyRoles.push("owner");
-  }
-  if (session?.role === "admin") {
-    legacyRoles.push("admin");
   }
   return normalizeRoles(legacyRoles);
 }

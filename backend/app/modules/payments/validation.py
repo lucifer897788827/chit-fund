@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.money import money_int
-from app.core.security import CurrentUser, require_owner
+from app.core.security import CurrentUser, forbid_admin_chit_participation, require_owner
 from app.models.chit import ChitGroup, GroupMembership, Installment
 from app.models.money import Payment
 from app.models.user import Owner, Subscriber
@@ -135,6 +135,7 @@ def is_settled_payout_status(status_value: str | None) -> bool:
 
 
 def validate_payment_submission(db: Session, payload, current_user: CurrentUser) -> ValidatedPaymentContext:
+    forbid_admin_chit_participation(current_user)
     owner = require_owner(current_user)
     if payload.ownerId != owner.id:
         raise HTTPException(

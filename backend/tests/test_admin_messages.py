@@ -114,6 +114,9 @@ def test_admin_user_management_lists_and_reads_users(app, db_session):
     assert body["role"] == "owner"
     assert "financialSummary" in body
     assert "participationStats" in body
+    assert "chits" in body
+    assert "payments" in body
+    assert "externalChitsData" in body
     assert "paymentScore" in body["financialSummary"]
 
 

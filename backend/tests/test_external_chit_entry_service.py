@@ -209,7 +209,7 @@ def test_create_external_chit_entry_rejects_admin_even_with_subscriber_profile(a
         create_external_chit_entry(db_session, payload, current_user)
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == "Subscriber profile required"
+    assert exc_info.value.detail == "Admin cannot have subscriber profile"
 
 
 def test_owner_without_subscriber_profile_auto_creates_before_entry_access(app, db_session):

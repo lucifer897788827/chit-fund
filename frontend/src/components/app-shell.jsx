@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { CreditCard, FolderKanban, Home, UserRound } from "lucide-react";
+import { CreditCard, FolderKanban, Gavel, Home, Settings2, UserRound } from "lucide-react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 
 import { fetchCurrentUser } from "../features/auth/api";
@@ -45,8 +45,26 @@ function getDefaultPageMeta(pathname) {
   if (pathname === "/admin/owner-requests") {
     return { title: "Owner requests", contextLabel: "Review subscriber upgrade requests" };
   }
+  if (pathname === "/admin/users") {
+    return { title: "Users", contextLabel: "Admin user directory" };
+  }
+  if (pathname.startsWith("/admin/users/")) {
+    return { title: "User detail", contextLabel: "Admin user detail" };
+  }
+  if (pathname === "/admin/groups") {
+    return { title: "Groups", contextLabel: "Read-only group oversight" };
+  }
+  if (pathname === "/admin/auctions") {
+    return { title: "Auctions", contextLabel: "Read-only auction oversight" };
+  }
+  if (pathname === "/admin/payments") {
+    return { title: "Payments", contextLabel: "Read-only payment oversight" };
+  }
+  if (pathname === "/admin/system") {
+    return { title: "System", contextLabel: "System health and worker status" };
+  }
   if (pathname.startsWith("/admin")) {
-    return { title: "Admin", contextLabel: "System-level control" };
+    return { title: "Dashboard", contextLabel: "System-level control" };
   }
   return { title: "Home", contextLabel: "Today in your chit fund workspace" };
 }
@@ -121,10 +139,12 @@ export default function AppShell({ children } = {}) {
     () =>
       roles.includes("admin") && !roles.includes("owner") && !roles.includes("subscriber")
         ? [
-            { label: "Admin", icon: Home, to: "/admin" },
-            { label: "Requests", icon: FolderKanban, to: "/admin/owner-requests" },
-            { label: "System", icon: CreditCard, to: "/admin/system" },
+            { label: "Dashboard", icon: Home, to: "/admin" },
             { label: "Users", icon: UserRound, to: "/admin/users" },
+            { label: "Groups", icon: FolderKanban, to: "/admin/groups" },
+            { label: "Auctions", icon: Gavel, to: "/admin/auctions" },
+            { label: "Payments", icon: CreditCard, to: "/admin/payments" },
+            { label: "System", icon: Settings2, to: "/admin/system" },
           ]
         : [
             { label: "Home", icon: Home, to: "/home" },

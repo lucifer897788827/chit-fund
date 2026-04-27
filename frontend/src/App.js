@@ -21,8 +21,10 @@ import HomePage from "./pages/HomePage";
 import PaymentsPage from "./pages/PaymentsPage";
 import ProfilePage from "./pages/ProfilePage";
 import AdminGroupDetailPage from "./pages/admin/AdminGroupDetailPage";
+import AdminAuctionsPage from "./pages/admin/AdminAuctionsPage";
 import AdminGroupsPage from "./pages/admin/AdminGroupsPage";
 import AdminHomePage from "./pages/admin/AdminHomePage";
+import AdminPaymentsPage from "./pages/admin/AdminPaymentsPage";
 import BroadcastPage from "./pages/admin/BroadcastPage";
 import OwnerRequestsPage from "./pages/admin/OwnerRequestsPage";
 import SystemPage from "./pages/admin/SystemPage";
@@ -87,10 +89,12 @@ function App() {
           <Route path="/admin/owner-requests" element={<OwnerRequestsPage />} />
           <Route path="/admin/users" element={<UsersPage />} />
           <Route path="/admin/users/:id" element={<UserDetailPage />} />
-          <Route path="/admin/groups" element={<AdminGroupsPage />} />
-          <Route path="/admin/groups/:id" element={<AdminGroupDetailPage />} />
-          <Route path="/admin/system" element={<SystemPage />} />
-          <Route path="/admin/broadcast" element={<BroadcastPage />} />
+              <Route path="/admin/groups" element={<AdminGroupsPage />} />
+              <Route path="/admin/groups/:id" element={<AdminGroupDetailPage />} />
+              <Route path="/admin/auctions" element={<AdminAuctionsPage />} />
+              <Route path="/admin/payments" element={<AdminPaymentsPage />} />
+              <Route path="/admin/system" element={<SystemPage />} />
+              <Route path="/admin/broadcast" element={<BroadcastPage />} />
         </Route>
 
         <Route path="/owner" element={<Navigate replace to="/home" />} />

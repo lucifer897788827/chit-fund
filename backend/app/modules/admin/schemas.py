@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -51,6 +51,36 @@ class AdminUserParticipationStatsResponse(BaseModel):
     prizedMemberships: int
 
 
+class AdminUserChitItemResponse(BaseModel):
+    id: int
+    kind: Literal["owned", "joined"]
+    groupCode: str
+    title: str
+    status: str
+    currentCycleNo: int
+
+
+class AdminUserPaymentItemResponse(BaseModel):
+    id: int
+    amount: int
+    paymentDate: date | None = None
+    status: str
+    paymentType: str
+    paymentMethod: str
+    groupId: int | None = None
+    membershipId: int | None = None
+
+
+class AdminUserExternalChitItemResponse(BaseModel):
+    id: int
+    title: str
+    organizerName: str
+    chitValue: int
+    installmentAmount: int
+    startDate: date | None = None
+    status: str
+
+
 class AdminUserDetailResponse(BaseModel):
     id: int
     phone: str
@@ -62,3 +92,6 @@ class AdminUserDetailResponse(BaseModel):
     subscriberId: int | None = None
     financialSummary: AdminUserFinancialSummaryResponse
     participationStats: AdminUserParticipationStatsResponse
+    chits: list[AdminUserChitItemResponse]
+    payments: list[AdminUserPaymentItemResponse]
+    externalChitsData: list[AdminUserExternalChitItemResponse]

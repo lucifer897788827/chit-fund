@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.core.security import CurrentUser
+from app.core.security import CurrentUser, hash_password
 from app.models.chit import ChitGroup, GroupMembership, Installment, MembershipSlot
 from app.models.user import Owner, Subscriber, User
 from app.modules.groups.join_service import join_group
@@ -26,6 +26,31 @@ def _owner_current_user(db_session) -> CurrentUser:
     owner = db_session.scalar(select(Owner).where(Owner.user_id == user.id))
     assert owner is not None
     return CurrentUser(user=user, owner=owner, subscriber=None)
+
+
+def _admin_current_user(db_session) -> CurrentUser:
+    owner = db_session.scalar(select(Owner).order_by(Owner.id.asc()))
+    assert owner is not None
+    admin_user = User(
+        email="admin-join@example.com",
+        phone="9000000100",
+        password_hash=hash_password("admin-pass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin_user)
+    db_session.flush()
+    admin_subscriber = Subscriber(
+        user_id=admin_user.id,
+        owner_id=owner.id,
+        full_name="Admin Join",
+        phone=admin_user.phone,
+        email=admin_user.email,
+        status="active",
+    )
+    db_session.add(admin_subscriber)
+    db_session.commit()
+    return CurrentUser(user=admin_user, owner=None, subscriber=admin_subscriber)
 
 
 def _create_group(
@@ -68,6 +93,17 @@ def test_join_group_requires_subscriber_profile(db_session):
 
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail == "Subscriber profile required"
+
+
+def test_join_group_rejects_admin_even_with_subscriber_profile(db_session):
+    group = _create_group(db_session)
+    current_user = _admin_current_user(db_session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        join_group(db_session, group.id, {"subscriberId": current_user.subscriber.id, "memberNo": 1}, current_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Admins cannot participate in chits"
 
 
 def test_join_group_rejects_inactive_group(db_session):

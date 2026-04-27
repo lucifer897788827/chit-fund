@@ -140,7 +140,7 @@ def test_require_external_chit_subscriber_rejects_admin_even_with_subscriber_pro
         require_external_chit_subscriber(current_user)
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == "External chit participant access required"
+    assert exc_info.value.detail == "Admins cannot participate in chits"
 
 
 def test_require_external_chit_subscriber_access_allows_own_subscriber_id(app, db_session):

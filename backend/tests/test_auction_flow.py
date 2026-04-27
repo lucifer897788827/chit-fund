@@ -36,6 +36,37 @@ def _owner_headers(client: TestClient, phone: str = "9999999999", password: str 
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
+def _admin_headers(client: TestClient, db_session) -> dict[str, str]:
+    admin_user = User(
+        email="admin-auction@example.com",
+        phone="9000000103",
+        password_hash=hash_password("admin-pass"),
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(admin_user)
+    db_session.flush()
+    owner = db_session.scalar(select(Owner).order_by(Owner.id.asc()))
+    assert owner is not None
+    db_session.add(
+        Subscriber(
+            user_id=admin_user.id,
+            owner_id=owner.id,
+            full_name="Admin Auction",
+            phone=admin_user.phone,
+            email=admin_user.email,
+            status="active",
+        )
+    )
+    db_session.commit()
+    response = client.post(
+        "/api/auth/login",
+        json={"phone": "9000000103", "password": "admin-pass"},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
 def _seed_live_auction(
     db_session,
     *,
@@ -192,6 +223,19 @@ def test_post_bid_returns_acceptance(app, db_session):
     bid = db_session.scalar(select(AuctionBid).where(AuctionBid.auction_session_id == session_id))
     assert bid is not None
     assert float(bid.bid_amount) == 12000.0
+
+
+def test_post_bid_rejects_admin_even_with_subscriber_profile(app, db_session):
+    session_id, membership_id, _group_id = _seed_live_auction(db_session)
+    client = TestClient(app)
+    response = client.post(
+        f"/api/auctions/{session_id}/bids",
+        headers=_admin_headers(client, db_session),
+        json={"membershipId": membership_id, "bidAmount": 12000, "idempotencyKey": "admin-bid-1"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admins cannot participate in chits"
 
 
 def test_post_bid_rejects_blank_idempotency_key(app, db_session):

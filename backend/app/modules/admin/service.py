@@ -339,7 +339,97 @@ def _serialize_admin_user_list_item(row) -> dict:
     }
 
 
-def _serialize_admin_user_detail(row, *, lite: bool) -> dict:
+def _load_admin_user_chits(db: Session, row) -> list[dict]:
+    chits: list[dict] = []
+
+    if row.owner_id is not None:
+        owned_groups = db.scalars(
+            select(ChitGroup)
+            .where(ChitGroup.owner_id == row.owner_id)
+            .order_by(ChitGroup.created_at.desc(), ChitGroup.id.desc())
+        ).all()
+        chits.extend(
+            {
+                "id": group.id,
+                "kind": "owned",
+                "groupCode": group.group_code,
+                "title": group.title,
+                "status": group.status,
+                "currentCycleNo": int(group.current_cycle_no or 0),
+            }
+            for group in owned_groups
+        )
+
+    if row.subscriber_id is not None:
+        joined_groups = db.execute(
+            select(ChitGroup)
+            .join(GroupMembership, GroupMembership.group_id == ChitGroup.id)
+            .where(GroupMembership.subscriber_id == row.subscriber_id)
+            .order_by(ChitGroup.created_at.desc(), ChitGroup.id.desc())
+        ).scalars().all()
+        chits.extend(
+            {
+                "id": group.id,
+                "kind": "joined",
+                "groupCode": group.group_code,
+                "title": group.title,
+                "status": group.status,
+                "currentCycleNo": int(group.current_cycle_no or 0),
+            }
+            for group in joined_groups
+        )
+
+    return chits
+
+
+def _load_admin_user_payments(db: Session, row) -> list[dict]:
+    if row.subscriber_id is None:
+        return []
+
+    payments = db.scalars(
+        select(Payment)
+        .where(Payment.subscriber_id == row.subscriber_id)
+        .order_by(Payment.payment_date.desc(), Payment.id.desc())
+    ).all()
+    return [
+        {
+            "id": payment.id,
+            "amount": int(payment.amount or 0),
+            "paymentDate": payment.payment_date,
+            "status": payment.status,
+            "paymentType": payment.payment_type,
+            "paymentMethod": payment.payment_method,
+            "groupId": None,
+            "membershipId": payment.membership_id,
+        }
+        for payment in payments
+    ]
+
+
+def _load_admin_user_external_chits(db: Session, row) -> list[dict]:
+    if row.subscriber_id is None:
+        return []
+
+    external_chits = db.scalars(
+        select(ExternalChit)
+        .where(ExternalChit.subscriber_id == row.subscriber_id)
+        .order_by(ExternalChit.created_at.desc(), ExternalChit.id.desc())
+    ).all()
+    return [
+        {
+            "id": chit.id,
+            "title": chit.title,
+            "organizerName": chit.organizer_name,
+            "chitValue": int(chit.chit_value or 0),
+            "installmentAmount": int(chit.installment_amount or 0),
+            "startDate": chit.start_date,
+            "status": chit.status,
+        }
+        for chit in external_chits
+    ]
+
+
+def _serialize_admin_user_detail(db: Session, row, *, lite: bool) -> dict:
     total_chits = int(row.owned_chits or 0) + int(row.joined_chits or 0) + int(row.external_chits or 0)
     payment_score = _payment_score(
         paid_installments=int(row.paid_installments or 0),
@@ -352,6 +442,9 @@ def _serialize_admin_user_detail(row, *, lite: bool) -> dict:
     prized_memberships = 0 if lite else int(row.prized_memberships or 0)
     payment_count = 0 if lite else int(row.payment_count or 0)
     payout_count = 0 if lite else int(row.payout_count or 0)
+    chits = [] if lite else _load_admin_user_chits(db, row)
+    payments = [] if lite else _load_admin_user_payments(db, row)
+    external_chits = [] if lite else _load_admin_user_external_chits(db, row)
 
     return {
         "id": row.id,
@@ -379,6 +472,9 @@ def _serialize_admin_user_detail(row, *, lite: bool) -> dict:
             "activeMemberships": active_memberships,
             "prizedMemberships": prized_memberships,
         },
+        "chits": chits,
+        "payments": payments,
+        "externalChitsData": external_chits,
     }
 
 
@@ -455,6 +551,6 @@ def get_admin_user(db: Session, user_id: int, current_user: CurrentUser, *, lite
     row = db.execute(_admin_user_detail_statement().where(User.id == user_id)).first()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    payload = _serialize_admin_user_detail(row, lite=lite)
+    payload = _serialize_admin_user_detail(db, row, lite=lite)
     store_admin_user_detail_cache(user_id, lite, payload)
     return payload

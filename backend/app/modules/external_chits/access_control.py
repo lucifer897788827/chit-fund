@@ -1,6 +1,6 @@
 from fastapi import HTTPException, status
 
-from app.core.security import CurrentUser
+from app.core.security import CurrentUser, forbid_admin_chit_participation
 from app.models.external import ExternalChit, ExternalChitEntry
 from app.models.user import Subscriber
 
@@ -12,6 +12,7 @@ def is_chit_participant(current_user: CurrentUser) -> bool:
 
 
 def require_external_chit_participant(current_user: CurrentUser) -> Subscriber:
+    forbid_admin_chit_participation(current_user)
     if not is_chit_participant(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

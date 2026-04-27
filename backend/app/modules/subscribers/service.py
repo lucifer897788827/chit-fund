@@ -1,13 +1,13 @@
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.money import money_int
-from app.core.security import CurrentUser, require_owner, require_subscriber
+from app.core.security import CurrentUser, forbid_admin_chit_participation, require_owner, require_subscriber
 from app.core.time import utcnow
 from app.models.auction import AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, GroupMembership, membership_can_bid
-from app.models.user import Subscriber
+from app.models.user import Subscriber, User
 from app.modules.auctions.service import get_auction_state
 from app.modules.admin.cache import invalidate_admin_users_cache
 from app.modules.groups.slot_service import sync_membership_slot_state
@@ -22,6 +22,10 @@ CHIT_PARTICIPANT_ROLES = {"subscriber", "owner", "chit_owner"}
 
 
 def ensure_subscriber_profile(db: Session, current_user: CurrentUser):
+    forbid_admin_chit_participation(
+        current_user,
+        detail="Admin cannot have subscriber profile",
+    )
     if current_user.user.role not in CHIT_PARTICIPANT_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscriber profile required")
 
@@ -52,6 +56,23 @@ def ensure_subscriber_profile(db: Session, current_user: CurrentUser):
 
     current_user.subscriber = subscriber
     return subscriber
+
+
+def deactivate_admin_subscriber_profiles(db: Session) -> int:
+    admin_user_ids = select(User.id).where(User.role == "admin")
+    result = db.execute(
+        update(Subscriber)
+        .where(
+            Subscriber.user_id.in_(admin_user_ids),
+            Subscriber.status != "inactive",
+        )
+        .values(status="inactive")
+    )
+    updated_count = int(result.rowcount or 0)
+    if updated_count:
+        db.commit()
+        invalidate_admin_users_cache()
+    return updated_count
 
 
 def create_subscriber(db: Session, payload, current_user: CurrentUser | None = None):
