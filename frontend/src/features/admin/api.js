@@ -18,3 +18,18 @@ export async function fetchAdminUser(userId, { lite = false } = {}) {
   });
   return data;
 }
+
+export async function fetchAdminGroups() {
+  const { data } = await apiClient.get("/admin/groups");
+  return data;
+}
+
+export async function fetchAdminAuctions() {
+  const { data } = await apiClient.get("/admin/auctions");
+  return data;
+}
+
+export async function fetchAdminPayments() {
+  const { data } = await apiClient.get("/admin/payments");
+  return data;
+}

@@ -27,6 +27,15 @@ async def create_owner_request_endpoint(
     return create_owner_request(db, current_user)
 
 
+@router.post("/api/users/request-owner", response_model=OwnerRequestResponse, status_code=status.HTTP_201_CREATED)
+async def create_owner_request_user_alias_endpoint(
+    _payload: OwnerRequestCreate,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return create_owner_request(db, current_user)
+
+
 @router.get("/api/admin/owner-requests", response_model=list[OwnerRequestResponse])
 async def list_owner_requests_endpoint(
     db: Session = Depends(get_db),

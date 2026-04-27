@@ -26,6 +26,9 @@ export default function AdminHomePage() {
           <Link className="action-button" to="/admin/payments">
             Payments
           </Link>
+          <Link className="action-button" to="/admin/owner-requests">
+            Owner requests
+          </Link>
           <Link className="action-button" to="/admin/system">
             System
           </Link>

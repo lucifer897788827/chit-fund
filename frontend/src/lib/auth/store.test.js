@@ -135,6 +135,7 @@ test("logout clears the current session", () => {
   expect(getCurrentUser()).toBeNull();
   expect(isAuthenticated()).toBe(false);
   expect(window.localStorage.getItem("chit-fund-session")).toBeNull();
+  expect(window.sessionStorage.getItem("chit-fund-session")).toBeNull();
 });
 
 test("clearSession remains available as an alias for logout", () => {

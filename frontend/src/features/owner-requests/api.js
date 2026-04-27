@@ -1,7 +1,7 @@
 import { apiClient } from "../../lib/api/client";
 
 export async function createOwnerRequest() {
-  const { data } = await apiClient.post("/owner-requests", {});
+  const { data } = await apiClient.post("/users/request-owner", {});
   return data;
 }
 

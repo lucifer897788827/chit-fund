@@ -1,6 +1,13 @@
 import { apiClient } from "../../lib/api/client";
 
-import { fetchActiveAdminMessage, fetchAdminUser, fetchAdminUsers } from "./api";
+import {
+  fetchActiveAdminMessage,
+  fetchAdminAuctions,
+  fetchAdminGroups,
+  fetchAdminPayments,
+  fetchAdminUser,
+  fetchAdminUsers,
+} from "./api";
 
 jest.mock("../../lib/api/client", () => ({
   apiClient: {
@@ -76,4 +83,40 @@ test("fetchAdminUser loads one admin user detail payload", async () => {
   expect(apiClient.get).toHaveBeenCalledWith("/admin/users/7", {
     params: { lite: false },
   });
+});
+
+test("fetchAdminGroups loads read-only admin group oversight data", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [{ id: 11, name: "Alpha Group", status: "active", owner: "Owner One", membersCount: 20, monthlyAmount: 5000 }],
+  });
+
+  await expect(fetchAdminGroups()).resolves.toEqual([
+    { id: 11, name: "Alpha Group", status: "active", owner: "Owner One", membersCount: 20, monthlyAmount: 5000 },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/groups");
+});
+
+test("fetchAdminAuctions loads read-only admin auction oversight data", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [{ id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed" }],
+  });
+
+  await expect(fetchAdminAuctions()).resolves.toEqual([
+    { id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed" },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/auctions");
+});
+
+test("fetchAdminPayments loads read-only admin payment oversight data", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [{ id: 31, user: "Subscriber One", group: "Alpha Group", amount: 9000, status: "paid" }],
+  });
+
+  await expect(fetchAdminPayments()).resolves.toEqual([
+    { id: 31, user: "Subscriber One", group: "Alpha Group", amount: 9000, status: "paid" },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/payments");
 });

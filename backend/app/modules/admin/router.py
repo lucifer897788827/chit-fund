@@ -5,8 +5,11 @@ from app.core.database import get_db
 from app.core.pagination import PaginatedResponse
 from app.core.security import CurrentUser, get_current_user
 from app.modules.admin.schemas import (
+    AdminAuctionSummaryResponse,
+    AdminGroupSummaryResponse,
     AdminMessageCreate,
     AdminMessageResponse,
+    AdminPaymentSummaryResponse,
     AdminUserDetailResponse,
     AdminUserSummaryResponse,
 )
@@ -15,6 +18,9 @@ from app.modules.admin.service import (
     create_admin_message,
     get_active_admin_message,
     get_admin_user,
+    list_admin_auctions,
+    list_admin_groups,
+    list_admin_payments,
     list_finalize_jobs,
     list_admin_users,
 )
@@ -74,3 +80,27 @@ async def get_admin_user_endpoint(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return get_admin_user(db, user_id, current_user, lite=lite)
+
+
+@router.get("/api/admin/groups", response_model=list[AdminGroupSummaryResponse])
+async def list_admin_groups_endpoint(
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return list_admin_groups(db, current_user)
+
+
+@router.get("/api/admin/auctions", response_model=list[AdminAuctionSummaryResponse])
+async def list_admin_auctions_endpoint(
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return list_admin_auctions(db, current_user)
+
+
+@router.get("/api/admin/payments", response_model=list[AdminPaymentSummaryResponse])
+async def list_admin_payments_endpoint(
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return list_admin_payments(db, current_user)

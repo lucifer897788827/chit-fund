@@ -23,6 +23,31 @@ class AdminMessageResponse(BaseModel):
     updatedAt: datetime
 
 
+class AdminGroupSummaryResponse(BaseModel):
+    id: int
+    name: str
+    status: str
+    owner: str
+    membersCount: int
+    monthlyAmount: int
+
+
+class AdminAuctionSummaryResponse(BaseModel):
+    id: int
+    group: str
+    winner: str | None = None
+    bidAmount: int | None = None
+    status: str
+
+
+class AdminPaymentSummaryResponse(BaseModel):
+    id: int
+    user: str
+    group: str | None = None
+    amount: int
+    status: str
+
+
 class AdminUserSummaryResponse(BaseModel):
     id: int
     role: str

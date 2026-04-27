@@ -87,3 +87,13 @@ def test_admin_can_reject_owner_request(app, db_session):
     assert reject_response.json()["status"] == "rejected"
     assert reject_response.json()["ownerCreated"] is False
     assert db_session.scalar(select(Owner).where(Owner.user_id == 2)) is None
+
+
+def test_subscriber_can_request_owner_via_users_alias(app, db_session):
+    client = TestClient(app)
+    subscriber_headers = _auth_headers(client, "8888888888", "pass123")
+
+    response = client.post("/api/users/request-owner", json={}, headers=subscriber_headers)
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending"

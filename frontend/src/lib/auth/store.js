@@ -245,6 +245,7 @@ export function logout() {
   }
 
   window.localStorage.removeItem(SESSION_KEY);
+  window.sessionStorage.removeItem(SESSION_KEY);
 }
 
 export function clearSession() {

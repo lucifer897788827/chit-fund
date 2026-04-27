@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { CreditCard, FolderKanban, Gavel, Home, Settings2, UserRound } from "lucide-react";
-import { Link, Outlet, useLocation } from "react-router-dom";
+import { ClipboardCheck, CreditCard, FolderKanban, Gavel, Home, Settings2, UserRound } from "lucide-react";
+import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 
+import { logoutUser } from "../features/auth/api";
 import { fetchCurrentUser } from "../features/auth/api";
 import { getCurrentUser, getUserRoles, updateSession } from "../lib/auth/store";
 
@@ -94,10 +95,13 @@ export function useAppShellHeader({ title, contextLabel }) {
 
 export default function AppShell({ children } = {}) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState(() => getCurrentUser());
   const [pageMeta, setPageMeta] = useState(null);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const roles = getUserRoles(currentUser);
   const roleLabel = formatRoleLabel(roles);
+  const isAdminShell = roles.includes("admin") && !roles.includes("owner") && !roles.includes("subscriber");
 
   useEffect(() => {
     setPageMeta(null);
@@ -137,13 +141,14 @@ export default function AppShell({ children } = {}) {
 
   const navItems = useMemo(
     () =>
-      roles.includes("admin") && !roles.includes("owner") && !roles.includes("subscriber")
+      isAdminShell
         ? [
             { label: "Dashboard", icon: Home, to: "/admin" },
             { label: "Users", icon: UserRound, to: "/admin/users" },
             { label: "Groups", icon: FolderKanban, to: "/admin/groups" },
             { label: "Auctions", icon: Gavel, to: "/admin/auctions" },
             { label: "Payments", icon: CreditCard, to: "/admin/payments" },
+            { label: "Requests", icon: ClipboardCheck, to: "/admin/owner-requests" },
             { label: "System", icon: Settings2, to: "/admin/system" },
           ]
         : [
@@ -152,8 +157,18 @@ export default function AppShell({ children } = {}) {
             { label: "Payments", icon: CreditCard, to: "/payments" },
             { label: "Profile", icon: UserRound, to: "/profile" },
           ],
-    [roles],
+    [isAdminShell],
   );
+
+  async function handleLogout() {
+    setIsLoggingOut(true);
+    try {
+      await logoutUser();
+    } finally {
+      setIsLoggingOut(false);
+      navigate("/");
+    }
+  }
 
   return (
     <AppShellHeaderContext.Provider value={setPageMeta}>
@@ -165,6 +180,13 @@ export default function AppShell({ children } = {}) {
               <p className="signed-in-shell__title">{headerMeta.title}</p>
               <p className="signed-in-shell__context">{headerMeta.contextLabel}</p>
             </div>
+            {isAdminShell ? (
+              <div className="signed-in-shell__header-actions">
+                <button className="action-button" disabled={isLoggingOut} onClick={handleLogout} type="button">
+                  {isLoggingOut ? "Signing out..." : "Log out"}
+                </button>
+              </div>
+            ) : null}
           </header>
 
           <div className="signed-in-shell__content">

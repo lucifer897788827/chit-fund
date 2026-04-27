@@ -11,7 +11,7 @@ from app.core.bootstrap import build_runtime_readiness_report
 from app.core.pagination import apply_pagination, build_paginated_response, count_statement, resolve_pagination
 from app.core.security import CurrentUser, require_admin
 from app.core.time import utcnow
-from app.models.auction import FinalizeJob
+from app.models.auction import AuctionBid, AuctionResult, AuctionSession, FinalizeJob
 from app.models.chit import ChitGroup, GroupMembership, Installment
 from app.models.external import ExternalChit
 from app.models.money import Payment, Payout
@@ -129,6 +129,128 @@ def create_admin_message(db: Session, payload: AdminMessageCreate, current_user:
     db.commit()
     db.refresh(message)
     return _serialize_admin_message(message)
+
+
+def list_admin_groups(db: Session, current_user: CurrentUser) -> list[dict]:
+    require_admin(current_user)
+    rows = db.execute(
+        select(
+            ChitGroup.id.label("id"),
+            ChitGroup.title.label("title"),
+            ChitGroup.status.label("status"),
+            func.coalesce(Owner.display_name, Owner.business_name, User.phone).label("owner_name"),
+            func.count(GroupMembership.id).label("members_count"),
+            ChitGroup.installment_amount.label("monthly_amount"),
+        )
+        .join(Owner, Owner.id == ChitGroup.owner_id)
+        .join(User, User.id == Owner.user_id)
+        .outerjoin(GroupMembership, GroupMembership.group_id == ChitGroup.id)
+        .group_by(
+            ChitGroup.id,
+            ChitGroup.title,
+            ChitGroup.status,
+            Owner.display_name,
+            Owner.business_name,
+            User.phone,
+            ChitGroup.installment_amount,
+        )
+        .order_by(ChitGroup.created_at.desc(), ChitGroup.id.desc())
+    ).all()
+
+    return [
+        {
+            "id": row.id,
+            "name": row.title,
+            "status": row.status,
+            "owner": row.owner_name,
+            "membersCount": int(row.members_count or 0),
+            "monthlyAmount": int(row.monthly_amount or 0),
+        }
+        for row in rows
+    ]
+
+
+def list_admin_auctions(db: Session, current_user: CurrentUser) -> list[dict]:
+    require_admin(current_user)
+    winner_name_sq = (
+        select(Subscriber.full_name)
+        .join(GroupMembership, GroupMembership.subscriber_id == Subscriber.id)
+        .where(GroupMembership.id == AuctionResult.winner_membership_id)
+        .scalar_subquery()
+    )
+
+    latest_bid_amount_sq = (
+        select(AuctionBid.bid_amount)
+        .where(AuctionBid.auction_session_id == AuctionSession.id)
+        .order_by(AuctionBid.bid_amount.desc(), AuctionBid.placed_at.desc(), AuctionBid.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+    rows = db.execute(
+        select(
+            AuctionSession.id.label("id"),
+            ChitGroup.title.label("group_title"),
+            AuctionSession.status.label("status"),
+            winner_name_sq.label("winner_name"),
+            func.coalesce(AuctionResult.winning_bid_amount, latest_bid_amount_sq).label("bid_amount"),
+        )
+        .join(ChitGroup, ChitGroup.id == AuctionSession.group_id)
+        .outerjoin(AuctionResult, AuctionResult.auction_session_id == AuctionSession.id)
+        .order_by(AuctionSession.created_at.desc(), AuctionSession.id.desc())
+    ).all()
+
+    return [
+        {
+            "id": row.id,
+            "group": row.group_title,
+            "winner": row.winner_name,
+            "bidAmount": int(row.bid_amount) if row.bid_amount is not None else None,
+            "status": row.status,
+        }
+        for row in rows
+    ]
+
+
+def _normalize_admin_payment_status(status_value: str | None) -> str:
+    normalized = (status_value or "").strip().lower()
+    if normalized in {"pending", "due", "scheduled"}:
+        return "pending"
+    return "paid"
+
+
+def list_admin_payments(db: Session, current_user: CurrentUser) -> list[dict]:
+    require_admin(current_user)
+    rows = db.execute(
+        select(
+            Payment.id.label("id"),
+            Payment.amount.label("amount"),
+            Payment.status.label("status"),
+            Subscriber.full_name.label("subscriber_name"),
+            User.phone.label("subscriber_phone"),
+            ChitGroup.title.label("group_title"),
+        )
+        .join(Subscriber, Subscriber.id == Payment.subscriber_id)
+        .join(User, User.id == Subscriber.user_id)
+        .outerjoin(GroupMembership, GroupMembership.id == Payment.membership_id)
+        .outerjoin(Installment, Installment.id == Payment.installment_id)
+        .outerjoin(
+            ChitGroup,
+            ChitGroup.id == func.coalesce(GroupMembership.group_id, Installment.group_id),
+        )
+        .order_by(Payment.payment_date.desc(), Payment.id.desc())
+    ).all()
+
+    return [
+        {
+            "id": row.id,
+            "user": row.subscriber_name or row.subscriber_phone,
+            "group": row.group_title,
+            "amount": int(row.amount or 0),
+            "status": _normalize_admin_payment_status(row.status),
+        }
+        for row in rows
+    ]
 
 
 def _normalized_admin_role(row) -> str:
