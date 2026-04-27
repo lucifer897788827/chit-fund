@@ -62,6 +62,20 @@ function attachAuthorizationHeader(config) {
   return config;
 }
 
+function logApiError(error) {
+  const url = error?.config?.url || "unknown";
+  const method = (error?.config?.method || "GET").toUpperCase();
+  const status = error?.response?.status ?? null;
+  const message = error?.message || "API request failed";
+
+  // Keep the payload deliberately small: never log request bodies, headers, tokens, or passwords.
+  console.error(`API ERROR: ${url}`, {
+    method,
+    status,
+    message,
+  });
+}
+
 let refreshPromise = null;
 
 async function refreshAccessToken() {
@@ -88,6 +102,8 @@ async function refreshAccessToken() {
 }
 
 async function handleUnauthorizedResponse(error) {
+  logApiError(error);
+
   const statusCode = error?.response?.status;
   const originalRequest = error?.config;
   const currentSession = getCurrentUser();

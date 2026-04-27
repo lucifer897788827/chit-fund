@@ -49,10 +49,12 @@ app_logger = configure_logging(
     structured_logging=settings.structured_logging,
     level=settings.log_level,
 )
+SLOW_THRESHOLD = 500
 _REQUEST_METRICS_LOCK = Lock()
 _REQUEST_METRICS = {
     "requests_total": 0,
     "errors_total": 0,
+    "slow_requests_total": 0,
     "duration_ms_total": 0.0,
 }
 
@@ -93,6 +95,15 @@ def _build_error_response(
         status_code=status_code,
         headers=headers,
     )
+
+
+def _request_user_id(request: Request) -> int | str | None:
+    user_id = getattr(request.state, "user_id", None)
+    if user_id is None:
+        return None
+    if isinstance(user_id, (int, str)):
+        return user_id
+    return str(user_id)
 
 
 async def _relay_auction_realtime_events(stop_event: asyncio.Event):
@@ -194,11 +205,16 @@ def create_app() -> FastAPI:
         )
 
     @application.exception_handler(Exception)
-    async def unhandled_exception_handler(_request: Request, exc: Exception):
+    async def unhandled_exception_handler(request: Request, exc: Exception):
         app_logger.exception(
             "http.request.unhandled_exception",
             extra={
                 "event": "http.request.unhandled_exception",
+                "request_id": getattr(request.state, "request_id", None),
+                "method": request.method,
+                "path": request.url.path,
+                "user_id": _request_user_id(request),
+                "app_env": settings.app_env,
             },
         )
         detail = str(exc) if settings.is_dev_profile else "Internal server error"
@@ -211,6 +227,7 @@ def create_app() -> FastAPI:
     @application.middleware("http")
     async def request_logging_middleware(request: Request, call_next):
         request_id = request.headers.get("x-request-id") or uuid4().hex
+        request.state.request_id = request_id
         started_at = perf_counter()
         with _REQUEST_METRICS_LOCK:
             _REQUEST_METRICS["requests_total"] += 1
@@ -235,6 +252,7 @@ def create_app() -> FastAPI:
                     "request_id": request_id,
                     "method": request.method,
                     "path": request.url.path,
+                    "user_id": _request_user_id(request),
                     "app_env": settings.app_env,
                 },
             )
@@ -245,6 +263,25 @@ def create_app() -> FastAPI:
             _REQUEST_METRICS["duration_ms_total"] += duration_ms
             if response.status_code >= 500:
                 _REQUEST_METRICS["errors_total"] += 1
+            is_slow_request = duration_ms > SLOW_THRESHOLD
+            if is_slow_request:
+                _REQUEST_METRICS["slow_requests_total"] += 1
+        if is_slow_request:
+            app_logger.warning(
+                "SLOW REQUEST: %s -> %.2fms",
+                request.url.path,
+                duration_ms,
+                extra={
+                    "event": "http.request.slow",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": duration_ms,
+                    "threshold_ms": SLOW_THRESHOLD,
+                    "app_env": settings.app_env,
+                },
+            )
         app_logger.info(
             "http.request.completed",
             extra={
@@ -257,11 +294,16 @@ def create_app() -> FastAPI:
                 "app_env": settings.app_env,
             },
         )
+        response.headers["x-request-id"] = request_id
         return response
 
     @application.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+    @application.get("/health")
+    async def health_root():
+        return await health()
 
     @application.get("/api/health/readiness")
     async def readiness():
@@ -274,17 +316,24 @@ def create_app() -> FastAPI:
     async def readiness_alias():
         return await readiness()
 
+    @application.get("/ready")
+    async def readiness_root():
+        return await readiness()
+
     @application.get("/api/metrics")
     async def metrics():
         with _REQUEST_METRICS_LOCK:
             request_count = int(_REQUEST_METRICS["requests_total"])
             error_count = int(_REQUEST_METRICS["errors_total"])
+            slow_request_count = int(_REQUEST_METRICS.get("slow_requests_total", 0))
             duration_ms_total = float(_REQUEST_METRICS["duration_ms_total"])
         average_duration_ms = round(duration_ms_total / request_count, 2) if request_count else 0.0
         error_rate = round(error_count / request_count, 4) if request_count else 0.0
         return {
             "requestsTotal": request_count,
             "errorsTotal": error_count,
+            "slowRequestsTotal": slow_request_count,
+            "slowThresholdMs": SLOW_THRESHOLD,
             "errorRate": error_rate,
             "averageDurationMs": average_duration_ms,
         }

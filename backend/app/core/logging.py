@@ -10,6 +10,17 @@ from typing import Any
 from app.core.config import settings
 
 APP_LOGGER_NAME = "app"
+REDACTED_VALUE = "[REDACTED]"
+SENSITIVE_LOG_KEYS = {
+    "authorization",
+    "access_token",
+    "refresh_token",
+    "token",
+    "password",
+    "password_hash",
+    "jwt",
+    "secret",
+}
 
 STANDARD_LOG_RECORD_ATTRS = {
     "args",
@@ -50,11 +61,18 @@ def resolve_structured_logging(app_env: str, configured_value: bool | None) -> b
     return app_env.strip().lower() in {"production", "prod"}
 
 
-def _coerce_json_safe(value: Any) -> Any:
+def _is_sensitive_log_key(key: Any) -> bool:
+    normalized = str(key).strip().lower().replace("-", "_")
+    return normalized in SENSITIVE_LOG_KEYS or normalized.endswith("_token") or normalized.endswith("_password")
+
+
+def _coerce_json_safe(value: Any, key: Any | None = None) -> Any:
+    if key is not None and _is_sensitive_log_key(key):
+        return REDACTED_VALUE
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, dict):
-        return {str(key): _coerce_json_safe(item) for key, item in value.items()}
+        return {str(item_key): _coerce_json_safe(item, item_key) for item_key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_coerce_json_safe(item) for item in value]
     return str(value)
@@ -74,7 +92,7 @@ def build_log_payload(record: logging.LogRecord) -> dict[str, Any]:
         payload["exception"] = "".join(traceback.format_exception(*record.exc_info)).strip()
 
     extras = {
-        key: _coerce_json_safe(value)
+        key: _coerce_json_safe(value, key)
         for key, value in record.__dict__.items()
         if key not in STANDARD_LOG_RECORD_ATTRS and not key.startswith("_")
     }
@@ -106,8 +124,22 @@ class PlainFormatter(logging.Formatter):
             "request_id",
             "method",
             "path",
+            "endpoint",
+            "user_id",
+            "success",
             "status_code",
             "duration_ms",
+            "total_ms",
+            "lockout_check_ms",
+            "db_fetch_ms",
+            "hash_verify_ms",
+            "refresh_token_ms",
+            "profile_fetch_ms",
+            "jwt_ms",
+            "commit_ms",
+            "db_query_ms",
+            "processing_ms",
+            "threshold_ms",
             "metadata",
             "app_env",
             "exception",

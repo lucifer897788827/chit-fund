@@ -11,6 +11,35 @@ def test_health_endpoint_remains_unchanged(app):
     assert response.json() == {"status": "ok"}
 
 
+def test_root_health_and_ready_aliases_keep_probe_payloads(app, monkeypatch):
+    from app import main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "build_runtime_readiness_report",
+        lambda: {
+            "status": "ok",
+            "ready": True,
+            "environment": "production",
+            "checks": {
+                "database": {"ok": True, "status": "up"},
+                "redis": {"ok": True, "status": "up"},
+                "celeryBroker": {"ok": True, "status": "up"},
+                "configuration": {"ok": True, "status": "up"},
+            },
+        },
+    )
+
+    client = TestClient(app)
+    health_response = client.get("/health")
+    ready_response = client.get("/ready")
+
+    assert health_response.status_code == 200
+    assert health_response.json() == {"status": "ok"}
+    assert ready_response.status_code == 200
+    assert ready_response.json()["ready"] is True
+
+
 def test_build_runtime_readiness_report_aggregates_dependency_checks(monkeypatch):
     monkeypatch.setattr(bootstrap_module.config_module.settings, "app_env", "production")
     monkeypatch.setattr(

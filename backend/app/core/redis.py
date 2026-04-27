@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from time import monotonic
 from typing import Any
 
 import redis
@@ -11,6 +12,8 @@ from app.core.config import settings
 class RedisClient:
     def __init__(self, redis_url: str | None = None):
         self._redis_url = redis_url or settings.redis_url
+        self._unavailable_until = 0.0
+        self._outage_backoff_seconds = 30.0
         pool_kwargs = {
             "decode_responses": True,
             "health_check_interval": settings.redis_health_check_interval_seconds,
@@ -30,6 +33,15 @@ class RedisClient:
             connection_pool=self._connection_pool,
             decode_responses=True,
         )
+
+    def _is_temporarily_unavailable(self) -> bool:
+        return monotonic() < self._unavailable_until
+
+    def _mark_unavailable(self) -> None:
+        self._unavailable_until = monotonic() + self._outage_backoff_seconds
+
+    def _mark_available(self) -> None:
+        self._unavailable_until = 0.0
 
     @property
     def connection_pool(self):
@@ -60,31 +72,48 @@ class RedisClient:
         return value
 
     def get(self, _key):
+        if self._is_temporarily_unavailable():
+            return None
         try:
             value = self._client.get(_key)
         except Exception:
+            self._mark_unavailable()
             return None
+        self._mark_available()
         return self._decode_value(value)
 
     def set(self, _key, _value, ex=None):
-        try:
-            return bool(self._client.set(_key, self._encode_value(_value), ex=ex))
-        except Exception:
+        if self._is_temporarily_unavailable():
             return False
+        try:
+            result = bool(self._client.set(_key, self._encode_value(_value), ex=ex))
+        except Exception:
+            self._mark_unavailable()
+            return False
+        self._mark_available()
+        return result
 
     def delete(self, *_keys):
         if not _keys:
             return False
-        try:
-            return bool(self._client.delete(*_keys))
-        except Exception:
+        if self._is_temporarily_unavailable():
             return False
+        try:
+            result = bool(self._client.delete(*_keys))
+        except Exception:
+            self._mark_unavailable()
+            return False
+        self._mark_available()
+        return result
 
     def ping(self) -> bool:
         try:
-            return bool(self._client.ping())
+            result = bool(self._client.ping())
         except Exception:
+            self._mark_unavailable()
             return False
+        self._mark_available()
+        return result
 
     def health(self) -> dict[str, Any]:
         healthy = self.ping()

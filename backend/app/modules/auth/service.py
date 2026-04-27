@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, select
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm import Session
-from time import time
+from time import perf_counter, time
 
 from app.core.security import (
     ACCESS_TOKEN_EXPIRES_MINUTES,
@@ -39,6 +41,7 @@ REFRESH_TOKEN_EXPIRES_DAYS = 30
 REFRESH_TOKEN_CLEANUP_RETENTION_DAYS = 7
 REFRESH_TOKEN_BYTES = 48
 PASSWORD_RESET_ERROR = "Invalid or expired password reset token"
+logger = logging.getLogger(__name__)
 
 
 def _normalize_phone(phone: str) -> str:
@@ -173,13 +176,51 @@ def _cleanup_refresh_tokens(db: Session) -> int:
     return int(result.rowcount or 0)
 
 
-def _build_token_response(db: Session, user: User, refresh_token: str, refresh_token_expires_at: datetime) -> dict:
+def _elapsed_ms(started_at: float) -> float:
+    return round((perf_counter() - started_at) * 1000, 2)
+
+
+def _record_timing(timings: dict[str, float], key: str, started_at: float) -> None:
+    timings[key] = _elapsed_ms(started_at)
+
+
+def _log_login_performance(*, phone: str, success: bool, timings: dict[str, float], user_id: int | None = None) -> None:
+    extra = {
+        "event": "auth.login.performance",
+        "success": success,
+        "user_id": user_id,
+        "lockout_check_ms": timings.get("lockout_check_ms", 0.0),
+        "db_fetch_ms": timings.get("db_fetch_ms", 0.0),
+        "hash_verify_ms": timings.get("hash_verify_ms", 0.0),
+        "refresh_token_ms": timings.get("refresh_token_ms", 0.0),
+        "profile_fetch_ms": timings.get("profile_fetch_ms", 0.0),
+        "jwt_ms": timings.get("jwt_ms", 0.0),
+        "commit_ms": timings.get("commit_ms", 0.0),
+        "total_ms": timings.get("total_ms", 0.0),
+    }
+    logger.info("auth.login.performance", extra=extra)
+
+
+def _build_token_response(
+    db: Session,
+    user: User,
+    refresh_token: str,
+    refresh_token_expires_at: datetime,
+    timings: dict[str, float] | None = None,
+) -> dict:
+    profile_started_at = perf_counter()
     owner = db.scalar(select(Owner).where(Owner.user_id == user.id))
     subscriber = db.scalar(select(Subscriber).where(Subscriber.user_id == user.id))
+    if timings is not None:
+        _record_timing(timings, "profile_fetch_ms", profile_started_at)
     roles = _resolve_roles(user=user, owner=owner, subscriber=subscriber)
     primary_role = _derive_primary_role(user=user, roles=roles)
+    jwt_started_at = perf_counter()
+    access_token = create_access_token(str(user.id))
+    if timings is not None:
+        _record_timing(timings, "jwt_ms", jwt_started_at)
     return {
-        "access_token": create_access_token(str(user.id)),
+        "access_token": access_token,
         "token_type": "bearer",
         "refresh_token": refresh_token,
         "refresh_token_expires_at": refresh_token_expires_at,
@@ -261,11 +302,45 @@ def _normalize_signup_payload(payload) -> SimpleNamespace:
 
 
 def login_user(db: Session, phone: str, password: str) -> dict:
+    timings: dict[str, float] = {}
+    total_started_at = perf_counter()
     normalized_phone = _normalize_phone(phone)
+    lockout_started_at = perf_counter()
     _maybe_raise_lockout(normalized_phone)
+    _record_timing(timings, "lockout_check_ms", lockout_started_at)
 
-    user = db.scalar(select(User).where(User.phone == normalized_phone))
-    if user is None or not verify_password(password, user.password_hash):
+    db_fetch_started_at = perf_counter()
+    user = db.scalar(
+        select(User)
+        .options(
+            load_only(
+                User.id,
+                User.phone,
+                User.password_hash,
+                User.role,
+                User.is_active,
+                User.last_login_at,
+                User.updated_at,
+            )
+        )
+        .where(User.phone == normalized_phone)
+    )
+    _record_timing(timings, "db_fetch_ms", db_fetch_started_at)
+    if user is None:
+        timings["total_ms"] = _elapsed_ms(total_started_at)
+        _log_login_performance(phone=normalized_phone, success=False, timings=timings)
+        _register_failed_login(normalized_phone)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid phone or password",
+        )
+
+    hash_started_at = perf_counter()
+    password_valid = verify_password(password, user.password_hash)
+    _record_timing(timings, "hash_verify_ms", hash_started_at)
+    if not password_valid:
+        timings["total_ms"] = _elapsed_ms(total_started_at)
+        _log_login_performance(phone=normalized_phone, success=False, timings=timings, user_id=user.id)
         _register_failed_login(normalized_phone)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -275,10 +350,18 @@ def login_user(db: Session, phone: str, password: str) -> dict:
     _reset_login_attempts(normalized_phone)
     user.last_login_at = utcnow()
     user.updated_at = utcnow()
-    refresh_token, refresh_token_expires_at = _issue_refresh_token(db, user.id)
+    user_id = user.id
+    refresh_started_at = perf_counter()
+    refresh_token, refresh_token_expires_at = _issue_refresh_token(db, user_id)
+    _record_timing(timings, "refresh_token_ms", refresh_started_at)
     _cleanup_refresh_tokens(db)
+    response = _build_token_response(db, user, refresh_token, refresh_token_expires_at, timings=timings)
+    commit_started_at = perf_counter()
     db.commit()
-    return _build_token_response(db, user, refresh_token, refresh_token_expires_at)
+    _record_timing(timings, "commit_ms", commit_started_at)
+    timings["total_ms"] = _elapsed_ms(total_started_at)
+    _log_login_performance(phone=normalized_phone, success=True, timings=timings, user_id=user_id)
+    return response
 
 
 def signup_user(db: Session, payload) -> dict:

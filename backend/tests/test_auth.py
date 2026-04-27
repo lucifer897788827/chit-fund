@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 from jose import jwt
@@ -6,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.logging import configure_logging
 from app.core.security import hash_password, hash_password_reset_token, verify_password
 from app.core.time import utcnow
 from app.models.auth import RefreshToken
@@ -75,6 +77,36 @@ def test_login_returns_access_token(app):
     claims = jwt.decode(body["access_token"], settings.jwt_secret, algorithms=["HS256"])
     assert claims["sub"] == "1"
     assert claims["typ"] == "access"
+
+
+def test_login_emits_performance_breakdown(app, capsys, monkeypatch):
+    configure_logging(app_env="development", structured_logging=True, level="INFO")
+    ticks = iter([10.0 + (index * 0.01) for index in range(40)])
+    monkeypatch.setattr(
+        auth_service,
+        "perf_counter",
+        ticks.__next__,
+        raising=False,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/auth/login",
+        json={"phone": "9999999999", "password": "secret123"},
+    )
+
+    assert response.status_code == 200
+    payloads = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip().startswith("{")
+    ]
+    performance_log = next(payload for payload in payloads if payload.get("event") == "auth.login.performance")
+    assert performance_log["db_fetch_ms"] >= 0
+    assert performance_log["hash_verify_ms"] >= 0
+    assert performance_log["jwt_ms"] >= 0
+    assert performance_log["total_ms"] >= 0
+    assert performance_log["success"] is True
 
 
 def test_login_updates_last_login_timestamp(app, db_session):
@@ -232,6 +264,21 @@ def test_login_rejects_invalid_password(app):
         "/api/auth/login",
         json={"phone": "9999999999", "password": "wrong-password"},
     )
+    assert response.status_code == 401
+
+
+def test_login_missing_user_exits_before_password_verification(app, monkeypatch):
+    def fail_verify_password(*_args, **_kwargs):
+        raise AssertionError("Password verification should not run for a missing user")
+
+    monkeypatch.setattr(auth_service, "verify_password", fail_verify_password)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/auth/login",
+        json={"phone": "0000000000", "password": "wrong-password"},
+    )
+
     assert response.status_code == 401
 
 

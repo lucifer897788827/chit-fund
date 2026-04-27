@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
@@ -13,11 +14,13 @@ from sqlalchemy.orm import Session, configure_mappers
 from app.core import database
 from app.core.logging import APP_LOGGER_NAME
 from app.core.money import money_int
+from app.core.redis import redis_client
 from app.core.security import CurrentUser, create_access_token
 from app.core.time import utcnow
 from app.models import AuctionBid, AuctionSession, Installment, Owner, Payout, Subscriber, User
 from app.models.auction import AuctionResult
 from app.models.chit import ChitGroup
+from app.modules.auth.schemas import TokenResponse
 from app.modules.auctions.schemas import AuctionFinalizeResponse
 import app.core.security as security_module
 import app.modules.auctions.service as auction_service
@@ -31,6 +34,15 @@ def _warm_database_connection() -> dict[str, Any]:
         connection.execute(text("SELECT 1"))
     return {
         "status": "ready",
+        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+    }
+
+
+def _warm_redis_connection() -> dict[str, Any]:
+    started_at = perf_counter()
+    connected = redis_client.ping()
+    return {
+        "status": "ready" if connected else "unavailable",
         "duration_ms": round((perf_counter() - started_at) * 1000, 2),
     }
 
@@ -147,6 +159,7 @@ def warm_finalize_function_paths(db: Session) -> dict[str, Any]:
     current_user = CurrentUser(user=owner_user, owner=owner, subscriber=owner_subscriber)
     effective_now = utcnow()
     security_module._resolve_current_user(
+        SimpleNamespace(state=SimpleNamespace()),
         HTTPAuthorizationCredentials(
             scheme="Bearer",
             credentials=create_access_token(str(owner_user.id)),
@@ -327,6 +340,31 @@ def warm_finalize_response_path() -> dict[str, Any]:
     }
 
 
+def warm_auth_response_path() -> dict[str, Any]:
+    started_at = perf_counter()
+    payload = {
+        "access_token": create_access_token("0"),
+        "token_type": "bearer",
+        "refresh_token": "warmup-refresh-token",
+        "refresh_token_expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "access_token_expires_in": 900,
+        "refresh_token_expires_in": 2592000,
+        "role": "subscriber",
+        "roles": ["subscriber"],
+        "owner_id": None,
+        "subscriber_id": 1,
+        "has_subscriber_profile": True,
+        "user": {"id": 0, "roles": ["subscriber"]},
+    }
+    validated = TokenResponse.model_validate(payload)
+    jsonable_encoder(validated)
+    validated.model_dump(mode="json")
+    return {
+        "status": "ready",
+        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+    }
+
+
 def run_startup_warmup() -> dict[str, Any]:
     started_at = perf_counter()
     results: dict[str, Any] = {}
@@ -339,6 +377,15 @@ def run_startup_warmup() -> dict[str, Any]:
             extra={"event": "app.startup.warmup.db_failed"},
         )
         results["db"] = {"status": "failed", "error": str(exc)}
+
+    try:
+        results["redis"] = _warm_redis_connection()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception(
+            "Startup Redis warmup failed",
+            extra={"event": "app.startup.warmup.redis_failed"},
+        )
+        results["redis"] = {"status": "failed", "error": str(exc)}
 
     try:
         results["orm"] = _warm_finalize_models()
@@ -368,15 +415,26 @@ def run_startup_warmup() -> dict[str, Any]:
         )
         results["response"] = {"status": "failed", "error": str(exc)}
 
+    try:
+        results["auth_response"] = warm_auth_response_path()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception(
+            "Startup auth response warmup failed",
+            extra={"event": "app.startup.warmup.auth_response_failed"},
+        )
+        results["auth_response"] = {"status": "failed", "error": str(exc)}
+
     logger.info(
         "Startup warmup completed",
         extra={
             "event": "app.startup.warmup.completed",
             "duration_ms": round((perf_counter() - started_at) * 1000, 2),
             "db_status": results.get("db", {}).get("status"),
+            "redis_status": results.get("redis", {}).get("status"),
             "orm_status": results.get("orm", {}).get("status"),
             "finalize_status": results.get("finalize", {}).get("status"),
             "response_status": results.get("response", {}).get("status"),
+            "auth_response_status": results.get("auth_response", {}).get("status"),
         },
     )
     return results

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from time import perf_counter
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,6 +17,8 @@ from app.models.support import AdminMessage
 from app.models.user import Owner, Subscriber, User
 from app.modules.admin.schemas import AdminMessageCreate
 from app.tasks.auction_tasks import get_finalize_job_worker_health
+
+logger = logging.getLogger(__name__)
 
 
 def list_finalize_jobs(db: Session, current_user: CurrentUser) -> dict:
@@ -165,9 +170,27 @@ def _build_admin_user_summary(db: Session, user: User) -> dict:
 
 
 def list_admin_users(db: Session, current_user: CurrentUser) -> list[dict]:
-    require_admin(current_user)
+    admin = require_admin(current_user)
+    started_at = perf_counter()
+    query_started_at = perf_counter()
     users = db.scalars(select(User).order_by(User.id.asc())).all()
-    return [_build_admin_user_summary(db, user) for user in users]
+    db_query_ms = round((perf_counter() - query_started_at) * 1000, 2)
+    processing_started_at = perf_counter()
+    summaries = [_build_admin_user_summary(db, user) for user in users]
+    processing_ms = round((perf_counter() - processing_started_at) * 1000, 2)
+    duration_ms = round((perf_counter() - started_at) * 1000, 2)
+    logger.info(
+        "admin.performance",
+        extra={
+            "event": "admin.performance",
+            "endpoint": "/api/admin/users",
+            "user_id": admin.id,
+            "db_query_ms": db_query_ms,
+            "processing_ms": processing_ms,
+            "duration_ms": duration_ms,
+        },
+    )
+    return summaries
 
 
 def get_admin_user(db: Session, user_id: int, current_user: CurrentUser) -> dict:

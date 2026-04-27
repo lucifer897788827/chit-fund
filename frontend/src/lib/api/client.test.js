@@ -80,6 +80,7 @@ describe("apiClient refresh handling", () => {
   });
 
   test("clears the session when refresh fails", async () => {
+    const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const store = require("../auth/store");
     const sessionEvents = require("../auth/session-events");
     store.getCurrentUser.mockReturnValue({
@@ -105,6 +106,40 @@ describe("apiClient refresh handling", () => {
 
     expect(store.clearSession).toHaveBeenCalledTimes(1);
     expect(sessionEvents.notifySessionExpired).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy).toHaveBeenCalledWith("API ERROR: /payments", {
+      method: "GET",
+      status: 401,
+      message: "API request failed",
+    });
+    consoleErrorSpy.mockRestore();
+  });
+
+  test("logs API errors without sensitive request details", async () => {
+    const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    const { apiClient } = require("./client");
+    const apiError = {
+      message: "Request failed with status code 500",
+      response: { status: 500 },
+      config: {
+        method: "post",
+        url: "/users/me/dashboard",
+        data: { password: "secret", token: "jwt" },
+        headers: { Authorization: "Bearer token" },
+      },
+    };
+
+    await expect(apiClient.responseRejectedHandler(apiError)).rejects.toBe(apiError);
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith("API ERROR: /users/me/dashboard", {
+      method: "POST",
+      status: 500,
+      message: "Request failed with status code 500",
+    });
+    expect(consoleErrorSpy.mock.calls[0][1]).not.toHaveProperty("data");
+    expect(consoleErrorSpy.mock.calls[0][1]).not.toHaveProperty("headers");
+
+    consoleErrorSpy.mockRestore();
   });
 
   test("uses the current local host for the backend fallback", () => {

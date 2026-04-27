@@ -1,5 +1,8 @@
+import json
+
 from fastapi.testclient import TestClient
 
+from app.core.logging import configure_logging
 from app.core.security import hash_password
 from app.models import AdminMessage, User
 
@@ -106,6 +109,29 @@ def test_admin_user_management_lists_and_reads_users(app, db_session):
     assert body["role"] == "chit_owner"
     assert "paymentBehavior" in body
     assert "stats" in body
+
+
+def test_admin_user_listing_emits_performance_breakdown(app, db_session, capsys):
+    configure_logging(app_env="development", structured_logging=True, level="INFO")
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    response = client.get("/api/admin/users", headers=headers)
+
+    assert response.status_code == 200
+    payloads = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip().startswith("{")
+    ]
+    performance_log = next(
+        payload for payload in payloads if payload.get("event") == "admin.performance"
+    )
+    assert performance_log["endpoint"] == "/api/admin/users"
+    assert performance_log["user_id"] >= 1
+    assert performance_log["db_query_ms"] >= 0
+    assert performance_log["processing_ms"] >= 0
+    assert performance_log["duration_ms"] >= 0
 
 
 def test_admin_user_management_requires_admin(app):

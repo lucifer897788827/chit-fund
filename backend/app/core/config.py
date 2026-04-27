@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     structured_logging: bool | None = None
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int | None = None
-    redis_socket_connect_timeout_seconds: float = 5.0
-    redis_socket_timeout_seconds: float = 5.0
+    redis_socket_connect_timeout_seconds: float = 0.2
+    redis_socket_timeout_seconds: float = 0.2
     redis_health_check_interval_seconds: int = 30
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Final
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt
 from passlib.context import CryptContext
@@ -79,6 +79,7 @@ def _decode_token(token: str) -> str:
 
 
 def _resolve_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> CurrentUser | None:
@@ -104,24 +105,27 @@ def _resolve_current_user(
     user, owner, subscriber = row
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    request.state.user_id = user.id
     return CurrentUser(user=user, owner=owner, subscriber=subscriber)
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> CurrentUser:
-    current_user = _resolve_current_user(credentials, db)
+    current_user = _resolve_current_user(request, credentials, db)
     if current_user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return current_user
 
 
 def get_optional_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> CurrentUser | None:
-    return _resolve_current_user(credentials, db)
+    return _resolve_current_user(request, credentials, db)
 
 
 def require_owner(current_user: CurrentUser) -> Owner:

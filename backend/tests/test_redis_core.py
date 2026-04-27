@@ -95,3 +95,31 @@ def test_redis_client_falls_back_when_redis_errors(monkeypatch):
     assert redis_core.redis_client.delete("key") is False
     assert redis_core.redis_client.ping() is False
     assert redis_core.redis_client.health()["ok"] is False
+
+
+def test_redis_client_skips_repeated_calls_during_outage(monkeypatch):
+    class _BrokenRedis:
+        def __init__(self):
+            self.get_calls = 0
+
+        def get(self, key):
+            self.get_calls += 1
+            raise redis.exceptions.ConnectionError("down")
+
+    broken = _BrokenRedis()
+
+    def fake_from_url(url, **kwargs):
+        return object()
+
+    def fake_redis(*, connection_pool, decode_responses=True):
+        return broken
+
+    monkeypatch.setattr(redis.ConnectionPool, "from_url", fake_from_url)
+    monkeypatch.setattr(redis, "Redis", fake_redis)
+
+    redis_core = importlib.reload(importlib.import_module("app.core.redis"))
+    redis_core.redis_client._outage_backoff_seconds = 30
+
+    assert redis_core.redis_client.get("missing") is None
+    assert redis_core.redis_client.get("missing") is None
+    assert broken.get_calls == 1
