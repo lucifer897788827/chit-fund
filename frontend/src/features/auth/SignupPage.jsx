@@ -5,6 +5,7 @@ import { FormActions, FormField, FormFrame } from "../../components/form-primiti
 import { getApiErrorMessage } from "../../lib/api-error";
 import { getDashboardPath, saveSession } from "../../lib/auth/store";
 import { signupUser } from "./api";
+import PasswordField from "./PasswordField";
 
 export default function SignupPage() {
   const navigate = useNavigate();
@@ -91,28 +92,22 @@ export default function SignupPage() {
               value={email}
             />
           </FormField>
-          <FormField htmlFor="signupPassword" label="Password">
-            <input
-              autoComplete="new-password"
-              className="text-input"
-              id="signupPassword"
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Create password"
-              type="password"
-              value={password}
-            />
-          </FormField>
-          <FormField htmlFor="confirmPassword" label="Confirm password">
-            <input
-              autoComplete="new-password"
-              className="text-input"
-              id="confirmPassword"
-              onChange={(event) => setConfirmPassword(event.target.value)}
-              placeholder="Repeat password"
-              type="password"
-              value={confirmPassword}
-            />
-          </FormField>
+          <PasswordField
+            autoComplete="new-password"
+            htmlFor="signupPassword"
+            label="Password"
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="Create password"
+            value={password}
+          />
+          <PasswordField
+            autoComplete="new-password"
+            htmlFor="confirmPassword"
+            label="Confirm password"
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            placeholder="Repeat password"
+            value={confirmPassword}
+          />
           {error ? (
             <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900" role="alert">
               {error}

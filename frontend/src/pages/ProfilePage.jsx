@@ -20,6 +20,16 @@ function getFirstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? null;
 }
 
+function getSignedMoneyTone(value) {
+  if (Number(value) > 0) {
+    return "text-emerald-700";
+  }
+  if (Number(value) < 0) {
+    return "text-red-700";
+  }
+  return "text-slate-700";
+}
+
 const MetricCard = memo(function MetricCard({ label, tone = "", value }) {
   return (
     <article className="panel">
@@ -65,6 +75,7 @@ export default function ProfilePage() {
   const ownerDashboard = dashboardData?.role === "owner" ? getOwnerDashboardFromUserDashboard(dashboardData) : null;
   const memberDashboard = getSubscriberDashboardFromUserDashboard(dashboardData);
   const financialSummary = financialSummaryQuery.data;
+  const dashboardFinancialSummary = dashboardData?.financial_summary ?? {};
   const loading = dashboardQuery.isLoading || financialSummaryQuery.isLoading;
   const loadErrorSource = dashboardQuery.error ?? financialSummaryQuery.error;
   const loadError = loadErrorSource
@@ -75,23 +86,30 @@ export default function ProfilePage() {
     const memberships = memberDashboard?.memberships ?? [];
     const monthlyCommitment = memberships.reduce((sum, item) => sum + Number(item.installmentAmount ?? 0), 0);
     const memberPaid = memberships.reduce((sum, item) => sum + Number(item.totalPaid ?? 0), 0);
-    const totalDividend = Number(financialSummary?.dividend ?? 0);
-    const totalReceived = Number(financialSummary?.total_received ?? 0);
-    const totalPaid = Number(financialSummary?.total_paid ?? ownerDashboard?.totalPaidAmount ?? memberPaid);
+    const totalDividend = Number(getFirstDefined(dashboardFinancialSummary?.dividend, financialSummary?.dividend) ?? 0);
+    const totalReceived = Number(getFirstDefined(dashboardFinancialSummary?.total_received, financialSummary?.total_received) ?? 0);
+    const totalPaid = Number(
+      getFirstDefined(dashboardFinancialSummary?.total_paid, financialSummary?.total_paid, ownerDashboard?.totalPaidAmount, memberPaid) ?? 0,
+    );
+    const calculatedNet = totalReceived + totalDividend - totalPaid;
+    const calculatedNetPosition = totalReceived - totalPaid;
     const wonCount = memberships.filter((item) => Number(item.wonSlotCount ?? 0) > 0 || String(item.prizedStatus ?? "").toLowerCase() === "prized").length;
     return {
       monthlyCommitment,
       totalPaid,
       totalDividend,
       totalReceived,
-      netProfit: Number(financialSummary?.net ?? totalReceived + totalDividend - totalPaid),
+      netProfit: Number(getFirstDefined(dashboardFinancialSummary?.net, financialSummary?.net, calculatedNet) ?? 0),
+      netPosition: Number(
+        getFirstDefined(dashboardFinancialSummary?.netPosition, financialSummary?.netPosition, calculatedNetPosition) ?? 0,
+      ),
       totalChits: memberships.reduce((sum, item) => sum + Number(item.slotCount ?? 1), 0),
       activeCount: memberships.filter((item) => String(item.membershipStatus ?? "").toLowerCase() === "active").length,
       completedCount: memberships.filter((item) => String(item.membershipStatus ?? "").toLowerCase() === "completed").length,
       wonCount,
       notWonCount: Math.max(memberships.length - wonCount, 0),
     };
-  }, [financialSummary, memberDashboard, ownerDashboard]);
+  }, [dashboardFinancialSummary, financialSummary, memberDashboard, ownerDashboard]);
 
   async function handleBecomeOwner() {
     setSubmitting(true);
@@ -134,16 +152,27 @@ export default function ProfilePage() {
     [currentUser, displayName, user.email, user.phone, user.phoneNumber, user.phone_number],
   );
   const ownerProfileId = getFirstDefined(currentUser?.owner_id, currentUser?.ownerId);
-  const netTone = snapshot.netProfit >= 0 ? "text-emerald-700" : "text-red-700";
+  const netProfitTone = getSignedMoneyTone(snapshot.netProfit);
+  const netPositionTone = getSignedMoneyTone(snapshot.netPosition);
   const financialMetrics = useMemo(
     () => [
       { label: "Monthly commitment", value: formatMoney(snapshot.monthlyCommitment) },
       { label: "Total paid", value: formatMoney(snapshot.totalPaid) },
       { label: "Total dividend", value: formatMoney(snapshot.totalDividend) },
       { label: "Total received", value: formatMoney(snapshot.totalReceived) },
-      { label: "Net profit", tone: netTone, value: formatMoney(snapshot.netProfit) },
+      { label: "Net profit", tone: netProfitTone, value: formatMoney(snapshot.netProfit) },
+      { label: "Net position", tone: netPositionTone, value: formatMoney(snapshot.netPosition) },
     ],
-    [netTone, snapshot.monthlyCommitment, snapshot.netProfit, snapshot.totalDividend, snapshot.totalPaid, snapshot.totalReceived],
+    [
+      netPositionTone,
+      netProfitTone,
+      snapshot.monthlyCommitment,
+      snapshot.netPosition,
+      snapshot.netProfit,
+      snapshot.totalDividend,
+      snapshot.totalPaid,
+      snapshot.totalReceived,
+    ],
   );
   const statCards = useMemo(
     () => [
@@ -178,7 +207,7 @@ export default function ProfilePage() {
 
       <section className="panel">
         <h2>Financial snapshot</h2>
-        <div className="panel-grid mt-4 md:grid-cols-5">
+        <div className="panel-grid mt-4 md:grid-cols-6">
           {financialMetrics.map((metric) => (
             <MetricCard key={metric.label} label={metric.label} tone={metric.tone} value={metric.value} />
           ))}

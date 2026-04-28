@@ -32,6 +32,69 @@ class AdminGroupSummaryResponse(BaseModel):
     monthlyAmount: int
 
 
+class AdminGroupDetailSummaryResponse(BaseModel):
+    id: int
+    name: str
+    status: str
+    owner: str
+    ownerPhone: str
+    membersCount: int
+    monthlyAmount: int
+    chitValue: int
+    currentCycleNo: int
+    startDate: date
+    firstAuctionDate: date
+
+
+class AdminGroupDetailMemberResponse(BaseModel):
+    membershipId: int
+    userId: int
+    name: str
+    phone: str
+    membershipStatus: str
+    prizedStatus: str
+    totalPaid: int
+    totalReceived: int
+    netPosition: int
+    paymentScore: int
+    pendingPaymentsCount: int
+    pendingAmount: int
+
+
+class AdminGroupDetailFinancialSummaryResponse(BaseModel):
+    totalCollected: int
+    totalPaid: int
+    pendingAmount: int
+
+
+class AdminGroupDetailAuctionResponse(BaseModel):
+    id: int
+    cycleNo: int
+    month: str
+    winner: str | None = None
+    bidAmount: int | None = None
+    status: str
+    scheduledAt: datetime | None = None
+
+
+class AdminGroupDetailRiskMemberResponse(BaseModel):
+    userId: int
+    name: str
+    phone: str
+    pendingPaymentsCount: int
+    pendingAmount: int
+    paymentScore: int
+    netPosition: int
+
+
+class AdminGroupDetailResponse(BaseModel):
+    group: AdminGroupDetailSummaryResponse
+    members: list[AdminGroupDetailMemberResponse]
+    financialSummary: AdminGroupDetailFinancialSummaryResponse
+    auctions: list[AdminGroupDetailAuctionResponse]
+    defaulters: list[AdminGroupDetailRiskMemberResponse]
+
+
 class AdminAuctionSummaryResponse(BaseModel):
     id: int
     group: str
@@ -48,6 +111,21 @@ class AdminPaymentSummaryResponse(BaseModel):
     groupId: int | None = None
     amount: int
     status: str
+
+
+class AdminDefaulterInsightResponse(BaseModel):
+    userId: int
+    name: str | None = None
+    phone: str
+    pendingPaymentsCount: int
+    pendingAmount: int
+
+
+class AdminInsightsSummaryResponse(BaseModel):
+    totalUsers: int
+    activeGroups: int
+    pendingPayments: int
+    defaulters: int
 
 
 class AdminUserSummaryResponse(BaseModel):
@@ -67,6 +145,7 @@ class AdminUserFinancialSummaryResponse(BaseModel):
     payoutCount: int
     totalReceived: int
     netCashflow: int
+    netPosition: int
     paymentScore: int
 
 
@@ -124,3 +203,22 @@ class AdminUserDetailResponse(BaseModel):
     chits: list[AdminUserChitItemResponse]
     payments: list[AdminUserPaymentItemResponse]
     externalChitsData: list[AdminUserExternalChitItemResponse]
+
+
+class AdminUserDeactivateResponse(BaseModel):
+    id: int
+    isActive: bool
+
+
+class AdminUserActivateResponse(BaseModel):
+    id: int
+    isActive: bool
+
+
+class AdminBulkDeactivateRequest(BaseModel):
+    userIds: list[int] = Field(min_length=1)
+
+
+class AdminBulkDeactivateResponse(BaseModel):
+    deactivatedUserIds: list[int]
+    count: int

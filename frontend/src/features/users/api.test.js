@@ -19,6 +19,7 @@ test("fetchMyFinancialSummary loads the authenticated financial summary", async 
       total_received: 4000,
       dividend: 100,
       net: 3100,
+      netPosition: 3000,
     },
   });
 
@@ -27,6 +28,7 @@ test("fetchMyFinancialSummary loads the authenticated financial summary", async 
     total_received: 4000,
     dividend: 100,
     net: 3100,
+    netPosition: 3000,
   });
 
   expect(apiClient.get).toHaveBeenCalledWith("/users/me/financial-summary");

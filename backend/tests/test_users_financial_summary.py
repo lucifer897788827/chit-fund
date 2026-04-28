@@ -124,6 +124,7 @@ def test_my_financial_summary_uses_payments_payouts_and_dividends(app, db_sessio
         "total_received": 4000,
         "dividend": 100,
         "net": 3100,
+        "netPosition": 3000,
     }
 
 
@@ -157,14 +158,17 @@ def test_user_dashboard_supports_subscriber_owner_and_admin(app, db_session):
     assert owner_response.json()["role"] == "owner"
     assert "owner_dashboard" in owner_response.json()["stats"]
     assert "subscriber_dashboard" in owner_response.json()["stats"]
+    assert "netPosition" in owner_response.json()["financial_summary"]
 
     assert subscriber_response.status_code == 200
     assert subscriber_response.json()["role"] == "subscriber"
     assert "subscriber_dashboard" in subscriber_response.json()["stats"]
+    assert "netPosition" in subscriber_response.json()["financial_summary"]
 
     assert admin_response.status_code == 200
     assert admin_response.json()["role"] == "admin"
     assert "admin_summary" in admin_response.json()["stats"]
+    assert "netPosition" in admin_response.json()["financial_summary"]
 
 
 def test_subscriber_dashboard_allows_owner_with_subscriber_profile(app):

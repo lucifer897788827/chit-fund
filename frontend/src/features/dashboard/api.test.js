@@ -15,12 +15,15 @@ test("fetches the universal user dashboard", async () => {
   apiClient.get.mockResolvedValueOnce({
     data: {
       role: "owner",
-      financial_summary: { total_paid: 0, total_received: 0, dividend: 0, net: 0 },
+      financial_summary: { total_paid: 0, total_received: 0, dividend: 0, net: 0, netPosition: 0 },
       stats: {},
     },
   });
 
-  await expect(fetchUserDashboard()).resolves.toMatchObject({ role: "owner" });
+  await expect(fetchUserDashboard()).resolves.toMatchObject({
+    role: "owner",
+    financial_summary: { netPosition: 0 },
+  });
 
   expect(apiClient.get).toHaveBeenCalledWith("/users/me/dashboard");
 });

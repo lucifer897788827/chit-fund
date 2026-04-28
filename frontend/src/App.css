@@ -7,6 +7,7 @@ body,
 body {
     margin: 0;
     overflow-x: hidden;
+    color: #0f172a;
     background:
         radial-gradient(circle at top, rgba(16, 185, 129, 0.18), transparent 35%),
         linear-gradient(180deg, #f5f7f4 0%, #edf2ec 100%);
@@ -65,7 +66,7 @@ body {
 .signed-in-shell__eyebrow,
 .signed-in-shell__context {
     margin: 0;
-    color: #475569;
+    color: #334155;
 }
 
 .signed-in-shell__eyebrow {
@@ -132,6 +133,10 @@ body {
 .page-shell p,
 .panel p {
     margin: 0;
+    color: #334155;
+}
+
+.muted-text {
     color: #475569;
 }
 
@@ -213,6 +218,46 @@ body {
     border-radius: 0.75rem;
     font: inherit;
     background: #fff;
+    color: #0f172a;
+}
+
+.text-input::placeholder {
+    color: #64748b;
+}
+
+.text-input--with-toggle {
+    padding-right: 5.75rem;
+}
+
+.password-field {
+    position: relative;
+}
+
+.password-field__toggle {
+    position: absolute;
+    top: 50%;
+    right: 0.5rem;
+    transform: translateY(-50%);
+    min-width: 4.5rem;
+    min-height: 2.25rem;
+    padding: 0 0.75rem;
+    border: none;
+    border-radius: 0.6rem;
+    background: #e2e8f0;
+    color: #0f172a;
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.password-field__toggle:hover {
+    background: #cbd5e1;
+}
+
+.password-field__toggle:focus-visible {
+    outline: 3px solid rgba(15, 118, 110, 0.35);
+    outline-offset: 2px;
 }
 
 .auction-room {
@@ -293,7 +338,7 @@ body {
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
-    color: #64748b;
+    color: #475569;
 }
 
 .auction-metric-value {
@@ -306,7 +351,7 @@ body {
 
 .auction-metric-detail {
     margin: 0.45rem 0 0;
-    color: #475569;
+    color: #334155;
     font-size: 0.92rem;
 }
 
@@ -388,7 +433,7 @@ body {
 .auction-bid-feed__detail,
 .auction-bid-feed__time,
 .auction-form-note {
-    color: #475569;
+    color: #334155;
     font-size: 0.92rem;
 }
 
@@ -456,7 +501,7 @@ body {
     min-height: 3.5rem;
     padding: 0.55rem 0.35rem;
     border-radius: 0.95rem;
-    color: #475569;
+    color: #334155;
     font-size: 0.75rem;
     font-weight: 700;
     text-decoration: none;
@@ -515,7 +560,7 @@ body {
     border: 1px solid rgba(15, 23, 42, 0.12);
     border-radius: 999px;
     background: #f8fafc;
-    color: #334155;
+    color: #1e293b;
     font-size: 0.78rem;
     font-weight: 800;
     line-height: 1;
@@ -588,7 +633,7 @@ body {
 }
 
 .responsive-table th {
-    color: #475569;
+    color: #334155;
     font-size: 0.75rem;
     font-weight: 800;
     letter-spacing: 0.08em;

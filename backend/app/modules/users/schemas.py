@@ -7,6 +7,7 @@ class FinancialSummaryResponse(BaseModel):
     total_received: int
     dividend: int
     net: int
+    netPosition: int
 
 
 class UserDashboardResponse(BaseModel):

@@ -5,6 +5,7 @@ import { FormActions, FormField, FormFrame } from "../../components/form-primiti
 import { loginUser } from "./api";
 import { getApiErrorMessage } from "../../lib/api-error";
 import { getDashboardPath, saveSession } from "../../lib/auth/store";
+import PasswordField from "./PasswordField";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -47,16 +48,14 @@ export default function LoginPage() {
               value={phone}
             />
           </FormField>
-          <FormField htmlFor="password" label="Password">
-            <input
-              className="text-input"
-              id="password"
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Enter password"
-              type="password"
-              value={password}
-            />
-          </FormField>
+          <PasswordField
+            autoComplete="current-password"
+            htmlFor="password"
+            label="Password"
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="Enter password"
+            value={password}
+          />
           {error ? (
             <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900" role="alert">
               {error}

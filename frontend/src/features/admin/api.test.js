@@ -1,10 +1,16 @@
 import { apiClient } from "../../lib/api/client";
 
 import {
+  activateAdminUser,
+  bulkDeactivateAdminUsers,
+  deactivateAdminUser,
   fetchActiveAdminMessage,
   fetchAdminAuctions,
+  fetchAdminDefaulters,
   fetchAdminDashboardOverview,
+  fetchAdminGroupDetail,
   fetchAdminGroups,
+  fetchAdminInsightsSummary,
   fetchAdminPayments,
   fetchAdminUser,
   fetchAdminUsers,
@@ -13,6 +19,7 @@ import {
 jest.mock("../../lib/api/client", () => ({
   apiClient: {
     get: jest.fn(),
+    post: jest.fn(),
   },
 }));
 
@@ -80,13 +87,31 @@ test("fetchAdminUsers forwards admin list filters without changing the API shape
   });
 });
 
+test("fetchAdminUsers forwards the score range filter for admin risk review", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: {
+      items: [{ id: 8, role: "owner", name: "Owner One", phone: "7777777777", isActive: true, totalChits: 4, paymentScore: 90 }],
+      page: 1,
+      pageSize: 20,
+      totalCount: 1,
+      totalPages: 1,
+    },
+  });
+
+  await fetchAdminUsers({ page: 1, limit: 20, scoreRange: "high" });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/users", {
+    params: { page: 1, limit: 20, lite: false, scoreRange: "high" },
+  });
+});
+
 test("fetchAdminUser loads one admin user detail payload", async () => {
   apiClient.get.mockResolvedValueOnce({
     data: {
       id: 7,
       role: "subscriber",
       phone: "8888888888",
-      financialSummary: { paymentCount: 2 },
+      financialSummary: { paymentCount: 2, netPosition: -250 },
       participationStats: { totalChits: 3 },
     },
   });
@@ -95,12 +120,47 @@ test("fetchAdminUser loads one admin user detail payload", async () => {
     id: 7,
     role: "subscriber",
     phone: "8888888888",
-    financialSummary: { paymentCount: 2 },
+    financialSummary: { paymentCount: 2, netPosition: -250 },
     participationStats: { totalChits: 3 },
   });
 
   expect(apiClient.get).toHaveBeenCalledWith("/admin/users/7", {
     params: { lite: false },
+  });
+});
+
+test("deactivateAdminUser posts the soft-deactivate action for one user", async () => {
+  apiClient.post.mockResolvedValueOnce({
+    data: { id: 7, isActive: false },
+  });
+
+  await expect(deactivateAdminUser(7)).resolves.toEqual({ id: 7, isActive: false });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/admin/users/7/deactivate");
+});
+
+test("activateAdminUser posts the re-activate action for one user", async () => {
+  apiClient.post.mockResolvedValueOnce({
+    data: { id: 7, isActive: true },
+  });
+
+  await expect(activateAdminUser(7)).resolves.toEqual({ id: 7, isActive: true });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/admin/users/7/activate");
+});
+
+test("bulkDeactivateAdminUsers posts the selected user ids as one safe batch", async () => {
+  apiClient.post.mockResolvedValueOnce({
+    data: { deactivatedUserIds: [8, 9], count: 2 },
+  });
+
+  await expect(bulkDeactivateAdminUsers([8, 9])).resolves.toEqual({
+    deactivatedUserIds: [8, 9],
+    count: 2,
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/admin/users/bulk-deactivate", {
+    userIds: [8, 9],
   });
 });
 
@@ -114,6 +174,28 @@ test("fetchAdminGroups loads read-only admin group oversight data", async () => 
   ]);
 
   expect(apiClient.get).toHaveBeenCalledWith("/admin/groups");
+});
+
+test("fetchAdminGroupDetail loads the admin intelligence view for one group", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: {
+      group: { id: 11, name: "Alpha Group" },
+      members: [],
+      financialSummary: { totalCollected: 10000, totalPaid: 5000, pendingAmount: 2000 },
+      auctions: [],
+      defaulters: [],
+    },
+  });
+
+  await expect(fetchAdminGroupDetail(11)).resolves.toEqual({
+    group: { id: 11, name: "Alpha Group" },
+    members: [],
+    financialSummary: { totalCollected: 10000, totalPaid: 5000, pendingAmount: 2000 },
+    auctions: [],
+    defaulters: [],
+  });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/groups/11");
 });
 
 test("fetchAdminGroups forwards status filters for admin oversight", async () => {
@@ -140,31 +222,86 @@ test("fetchAdminAuctions loads read-only admin auction oversight data", async ()
   expect(apiClient.get).toHaveBeenCalledWith("/admin/auctions");
 });
 
-test("fetchAdminDashboardOverview combines admin list signals into dashboard metrics", async () => {
+test("fetchAdminDefaulters loads admin defaulter insights with the default threshold", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [
+      {
+        userId: 31,
+        name: "Subscriber One",
+        phone: "9999999999",
+        pendingPaymentsCount: 3,
+        pendingAmount: 27000,
+      },
+    ],
+  });
+
+  await expect(fetchAdminDefaulters()).resolves.toEqual([
+    {
+      userId: 31,
+      name: "Subscriber One",
+      phone: "9999999999",
+      pendingPaymentsCount: 3,
+      pendingAmount: 27000,
+    },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/insights/defaulters", {
+    params: { threshold: 1 },
+  });
+});
+
+test("fetchAdminDefaulters forwards an explicit threshold for admin risk review", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [],
+  });
+
+  await expect(fetchAdminDefaulters({ threshold: 4 })).resolves.toEqual([]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/insights/defaulters", {
+    params: { threshold: 4 },
+  });
+});
+
+test("fetchAdminInsightsSummary loads admin intelligence summary counts", async () => {
   apiClient.get
     .mockResolvedValueOnce({
       data: {
-        items: [{ id: 1 }],
-        page: 1,
-        pageSize: 1,
-        totalCount: 12,
-        totalPages: 12,
+        totalUsers: 12,
+        activeGroups: 2,
+        pendingPayments: 1,
+        defaulters: 4,
+      },
+    });
+
+  await expect(fetchAdminInsightsSummary()).resolves.toEqual({
+    totalUsers: 12,
+    activeGroups: 2,
+    pendingPayments: 1,
+    defaulters: 4,
+  });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/insights/summary");
+});
+
+test("fetchAdminDashboardOverview combines summary counts with defaulter details", async () => {
+  apiClient.get
+    .mockResolvedValueOnce({
+      data: {
+        totalUsers: 12,
+        activeGroups: 2,
+        pendingPayments: 1,
+        defaulters: 4,
       },
     })
     .mockResolvedValueOnce({
       data: [
-        { id: 11, status: "active" },
-        { id: 12, status: "completed" },
-        { id: 13, status: "active" },
-      ],
-    })
-    .mockResolvedValueOnce({
-      data: [{ id: 31, user: "Subscriber One", group: "Alpha Group", amount: 9000, status: "pending" }],
-    })
-    .mockResolvedValueOnce({
-      data: [
-        { id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed", scheduledAt: "2026-04-28T10:00:00Z" },
-        { id: 22, group: "Beta Group", winner: "Subscriber Two", bidAmount: 42000, status: "open", scheduledAt: "2026-04-27T10:00:00Z" },
+        {
+          userId: 31,
+          name: "Subscriber One",
+          phone: "9999999999",
+          pendingPaymentsCount: 3,
+          pendingAmount: 27000,
+        },
       ],
     });
 
@@ -172,7 +309,16 @@ test("fetchAdminDashboardOverview combines admin list signals into dashboard met
     totalUsers: 12,
     activeGroups: 2,
     pendingPayments: 1,
-    todayAuctions: 1,
+    defaultersCount: 4,
+    defaulters: [
+      {
+        userId: 31,
+        name: "Subscriber One",
+        phone: "9999999999",
+        pendingPaymentsCount: 3,
+        pendingAmount: 27000,
+      },
+    ],
   });
 });
 

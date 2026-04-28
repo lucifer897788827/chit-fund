@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
@@ -95,7 +95,7 @@ function createTestQueryClient() {
 function renderProfilePage(queryClient = createTestQueryClient()) {
   const result = render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
         <ProfilePage />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -108,11 +108,119 @@ test("uses backend financial summary instead of approximate local totals", async
   renderProfilePage();
 
   await waitFor(() => expect(fetchMyFinancialSummary).toHaveBeenCalled());
-  expect(await screen.findByText("Rs. 1,000")).toBeInTheDocument();
-  expect(screen.getByText("Rs. 100")).toBeInTheDocument();
-  expect(screen.getByText("Rs. 4,000")).toBeInTheDocument();
-  expect(screen.getByText("Rs. 3,100")).toBeInTheDocument();
+  const totalPaidCard = (await screen.findAllByText("Total paid"))[0].closest("article");
+  const totalDividendCard = screen.getByText("Total dividend").closest("article");
+  const totalReceivedCard = screen.getByText("Total received").closest("article");
+  const netProfitCard = screen.getByText("Net profit").closest("article");
+
+  expect(within(totalPaidCard).getByText("Rs. 1,000")).toBeInTheDocument();
+  expect(within(totalDividendCard).getByText("Rs. 100")).toBeInTheDocument();
+  expect(within(totalReceivedCard).getByText("Rs. 4,000")).toBeInTheDocument();
+  expect(within(netProfitCard).getByText("Rs. 3,100")).toBeInTheDocument();
   expect(screen.queryByText("Approximate calculation")).not.toBeInTheDocument();
+});
+
+test("prefers dashboard net position and uses positive tone when provided", async () => {
+  fetchUserDashboard.mockResolvedValueOnce({
+    role: "owner",
+    financial_summary: {
+      total_paid: 1500,
+      total_received: 4100,
+      dividend: 100,
+      net: 2700,
+      netPosition: 900,
+    },
+    stats: {
+      owner_dashboard: {
+        totalPaidAmount: 1000,
+        recentPayouts: [],
+      },
+      subscriber_dashboard: {
+        memberships: [],
+      },
+    },
+  });
+  fetchMyFinancialSummary.mockResolvedValueOnce({
+    total_paid: 1000,
+    total_received: 4000,
+    dividend: 100,
+    net: 3100,
+    netPosition: -300,
+  });
+
+  renderProfilePage();
+
+  const netPositionCard = (await screen.findAllByText("Net position"))[0].closest("article");
+  const metricValue = within(netPositionCard).getByText("Rs. 900");
+  expect(metricValue).toHaveClass("text-emerald-700");
+});
+
+test("shows negative net position in red when the dashboard reports a loss", async () => {
+  fetchUserDashboard.mockResolvedValueOnce({
+    role: "owner",
+    financial_summary: {
+      total_paid: 1500,
+      total_received: 1000,
+      dividend: 0,
+      net: -500,
+      netPosition: -500,
+    },
+    stats: {
+      owner_dashboard: {
+        totalPaidAmount: 1500,
+        recentPayouts: [],
+      },
+      subscriber_dashboard: {
+        memberships: [],
+      },
+    },
+  });
+  fetchMyFinancialSummary.mockResolvedValueOnce({
+    total_paid: 1500,
+    total_received: 1000,
+    dividend: 0,
+    net: -500,
+    netPosition: -500,
+  });
+
+  renderProfilePage();
+
+  const netPositionCard = (await screen.findAllByText("Net position"))[0].closest("article");
+  const metricValue = within(netPositionCard).getByText("Rs. -500");
+  expect(metricValue).toHaveClass("text-red-700");
+});
+
+test("shows zero net position with neutral tone when neither source provides a signed value", async () => {
+  fetchUserDashboard.mockResolvedValueOnce({
+    role: "owner",
+    financial_summary: {
+      total_paid: 1000,
+      total_received: 1000,
+      dividend: 0,
+      net: 0,
+    },
+    stats: {
+      owner_dashboard: {
+        totalPaidAmount: 1000,
+        recentPayouts: [],
+      },
+      subscriber_dashboard: {
+        memberships: [],
+      },
+    },
+  });
+  fetchMyFinancialSummary.mockResolvedValueOnce({
+    total_paid: 1000,
+    total_received: 1000,
+    dividend: 0,
+    net: 0,
+  });
+
+  renderProfilePage();
+
+  const netPositionCard = (await screen.findAllByText("Net position"))[0].closest("article");
+  const metricValue = within(netPositionCard).getByText("Rs. 0");
+  expect(metricValue).toHaveClass("text-slate-700");
 });
 
 test("reuses cached profile dashboard and financial summary on remount", async () => {

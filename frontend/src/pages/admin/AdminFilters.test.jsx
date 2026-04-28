@@ -76,6 +76,34 @@ test("UsersPage lets admins refine the directory by role", async () => {
   expect(fetchAdminUsers).toHaveBeenLastCalledWith({ page: 1, limit: 20, role: "owner" });
 });
 
+test("UsersPage lets admins refine the directory by payment score range", async () => {
+  const user = userEvent.setup();
+
+  fetchAdminUsers
+    .mockResolvedValueOnce({
+      items: [{ id: 1, role: "subscriber", phone: "9999999999", totalChits: 1, paymentScore: 45, createdAt: "2026-04-01T10:00:00Z" }],
+      page: 1,
+      pageSize: 20,
+      totalCount: 1,
+      totalPages: 1,
+    })
+    .mockResolvedValueOnce({
+      items: [{ id: 2, role: "owner", phone: "7777777777", totalChits: 4, paymentScore: 90, createdAt: "2026-04-02T10:00:00Z" }],
+      page: 1,
+      pageSize: 20,
+      totalCount: 1,
+      totalPages: 1,
+    });
+
+  renderAdminPage("/admin/users", <UsersPage />, "/admin/users");
+
+  expect(await screen.findByText("9999999999")).toBeInTheDocument();
+  await user.selectOptions(screen.getByLabelText("Payment score"), "high");
+
+  expect(await screen.findByText("7777777777")).toBeInTheDocument();
+  expect(fetchAdminUsers).toHaveBeenLastCalledWith({ page: 1, limit: 20, scoreRange: "high" });
+});
+
 test("AdminGroupsPage lets admins filter by group status", async () => {
   const user = userEvent.setup();
 

@@ -19,6 +19,7 @@ def get_my_financial_summary(db: Session, current_user: CurrentUser) -> dict:
             "total_received": 0,
             "dividend": 0,
             "net": 0,
+            "netPosition": 0,
         }
 
     total_paid = db.scalar(
@@ -53,6 +54,7 @@ def get_my_financial_summary(db: Session, current_user: CurrentUser) -> dict:
         "total_received": total_received_value,
         "dividend": dividend_value,
         "net": total_received_value + dividend_value - total_paid_value,
+        "netPosition": total_received_value - total_paid_value,
     }
 
 

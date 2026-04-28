@@ -4,12 +4,47 @@ import { Link, useParams } from "react-router-dom";
 import { PageErrorState, PageLoadingState } from "../../components/page-state";
 import { useAppShellHeader } from "../../components/app-shell";
 import { fetchAdminUser } from "../../features/admin/api";
+import { formatMoney } from "../../features/payments/balances";
 import { getApiErrorMessage } from "../../lib/api-error";
 
-function StatCard({ label, value }) {
+function getSignedMoneyTone(value) {
+  if (Number(value) > 0) {
+    return "text-emerald-700";
+  }
+  if (Number(value) < 0) {
+    return "text-red-700";
+  }
+  return "text-slate-700";
+}
+
+function getPaymentScoreBadgeClass(score) {
+  if (score >= 80) {
+    return "border-emerald-200 bg-emerald-100 text-emerald-900";
+  }
+  if (score >= 50) {
+    return "border-amber-200 bg-amber-100 text-amber-900";
+  }
+  return "border-red-200 bg-red-100 text-red-900";
+}
+
+function PaymentScoreBadge({ score }) {
+  const normalizedScore = Number(score ?? 0);
+  const badgeClass = getPaymentScoreBadgeClass(normalizedScore);
+
+  return (
+    <span
+      aria-label={`Payment score: ${normalizedScore} / 100`}
+      className={`inline-flex rounded-full border px-3 py-1.5 text-sm font-semibold ${badgeClass}`}
+    >
+      {normalizedScore} / 100
+    </span>
+  );
+}
+
+function StatCard({ label, tone = "", value }) {
   return (
     <article className="panel">
-      <h3>{value ?? 0}</h3>
+      <h3 className={tone}>{value ?? 0}</h3>
       <p>{label}</p>
     </article>
   );
@@ -54,6 +89,8 @@ export default function UserDetailPage() {
   const chits = Array.isArray(user?.chits) ? user.chits : [];
   const payments = Array.isArray(user?.payments) ? user.payments : [];
   const externalChits = Array.isArray(user?.externalChitsData) ? user.externalChitsData : [];
+  const netPosition = Number(financialSummary?.netPosition ?? 0);
+  const netPositionTone = getSignedMoneyTone(netPosition);
 
   return (
     <main className="page-shell">
@@ -91,7 +128,8 @@ export default function UserDetailPage() {
           <StatCard label="Payouts" value={financialSummary.payoutCount} />
           <StatCard label="Total received" value={financialSummary.totalReceived} />
           <StatCard label="Net cashflow" value={financialSummary.netCashflow} />
-          <StatCard label="Payment score" value={financialSummary.paymentScore} />
+          <StatCard label="Net position" tone={netPositionTone} value={formatMoney(netPosition)} />
+          <StatCard label="Payment score" value={<PaymentScoreBadge score={financialSummary.paymentScore} />} />
         </div>
       </section>
 

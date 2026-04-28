@@ -58,7 +58,7 @@ test("signs in and routes owners to the owner dashboard", async () => {
   expect(screen.getByLabelText(/Phone Number/i)).toHaveAttribute("placeholder", "Enter phone number");
 
   await user.type(screen.getByLabelText(/Phone Number/i), "9999999999");
-  await user.type(screen.getByLabelText(/Password/i), "secret123");
+  await user.type(screen.getByLabelText(/^Password$/i), "secret123");
   await user.click(screen.getByRole("button", { name: /Sign In/i }));
 
   await waitFor(() => {
@@ -95,7 +95,7 @@ test("keeps subscriber login routing on the subscriber dashboard", async () => {
   );
 
   await user.type(screen.getByLabelText(/Phone Number/i), "8888888888");
-  await user.type(screen.getByLabelText(/Password/i), "pass123");
+  await user.type(screen.getByLabelText(/^Password$/i), "pass123");
   await user.click(screen.getByRole("button", { name: /Sign In/i }));
 
   await waitFor(() => {
@@ -107,4 +107,23 @@ test("keeps subscriber login routing on the subscriber dashboard", async () => {
     );
   });
   expect(mockNavigate).toHaveBeenCalledWith("/subscriber-dashboard");
+});
+
+test("lets the user toggle password visibility on the login form", async () => {
+  const user = userEvent.setup();
+
+  render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <LoginPage />
+    </MemoryRouter>,
+  );
+
+  const passwordInput = screen.getByLabelText(/^Password$/i);
+  expect(passwordInput).toHaveAttribute("type", "password");
+
+  await user.click(screen.getByRole("button", { name: /show password/i }));
+  expect(passwordInput).toHaveAttribute("type", "text");
+
+  await user.click(screen.getByRole("button", { name: /hide password/i }));
+  expect(passwordInput).toHaveAttribute("type", "password");
 });

@@ -18,6 +18,7 @@ from app.models.money import Payment, Payout
 from app.models.support import AdminMessage
 from app.models.user import Owner, Subscriber, User
 from app.modules.admin.cache import (
+    invalidate_admin_users_cache,
     load_admin_user_detail_cache,
     load_admin_users_cache,
     store_admin_user_detail_cache,
@@ -27,6 +28,114 @@ from app.modules.admin.schemas import AdminMessageCreate
 from app.tasks.auction_tasks import get_finalize_job_worker_health
 
 logger = logging.getLogger(__name__)
+
+
+def _get_admin_target_user(db: Session, user_id: int) -> User:
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return user
+
+
+def _assert_admin_deactivation_allowed(target_user: User, acting_admin: User) -> None:
+    if target_user.id == acting_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admins cannot deactivate themselves",
+        )
+    if target_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admin users cannot be deactivated",
+        )
+
+
+def _assert_admin_activation_allowed(target_user: User, acting_admin: User) -> None:
+    if target_user.id == acting_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admins cannot activate themselves",
+        )
+    if target_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admin users cannot be activated",
+        )
+
+
+def _apply_user_deactivation(db: Session, target_user: User) -> None:
+    target_user.is_active = False
+    target_user.updated_at = utcnow()
+
+    owner_profile = db.scalar(select(Owner).where(Owner.user_id == target_user.id))
+    if owner_profile is not None:
+        owner_profile.status = "inactive"
+
+    subscriber_profile = db.scalar(select(Subscriber).where(Subscriber.user_id == target_user.id))
+    if subscriber_profile is not None:
+        subscriber_profile.status = "inactive"
+
+
+def _apply_user_activation(db: Session, target_user: User) -> None:
+    target_user.is_active = True
+    target_user.updated_at = utcnow()
+
+    owner_profile = db.scalar(select(Owner).where(Owner.user_id == target_user.id))
+    if owner_profile is not None:
+        owner_profile.status = "active"
+
+    subscriber_profile = db.scalar(select(Subscriber).where(Subscriber.user_id == target_user.id))
+    if subscriber_profile is not None:
+        subscriber_profile.status = "active"
+
+
+def deactivate_admin_user(db: Session, user_id: int, current_user: CurrentUser) -> dict:
+    admin = require_admin(current_user)
+    target_user = _get_admin_target_user(db, user_id)
+    _assert_admin_deactivation_allowed(target_user, admin)
+    _apply_user_deactivation(db, target_user)
+    db.commit()
+    invalidate_admin_users_cache()
+    return {
+        "id": target_user.id,
+        "isActive": bool(target_user.is_active),
+    }
+
+
+def activate_admin_user(db: Session, user_id: int, current_user: CurrentUser) -> dict:
+    admin = require_admin(current_user)
+    target_user = _get_admin_target_user(db, user_id)
+    _assert_admin_activation_allowed(target_user, admin)
+    _apply_user_activation(db, target_user)
+    db.commit()
+    invalidate_admin_users_cache()
+    return {
+        "id": target_user.id,
+        "isActive": bool(target_user.is_active),
+    }
+
+
+def bulk_deactivate_admin_users(db: Session, user_ids: list[int], current_user: CurrentUser) -> dict:
+    admin = require_admin(current_user)
+    normalized_user_ids = list(dict.fromkeys(user_ids))
+    target_users = db.scalars(select(User).where(User.id.in_(normalized_user_ids))).all()
+    target_users_by_id = {user.id: user for user in target_users}
+    missing_user_ids = [user_id for user_id in normalized_user_ids if user_id not in target_users_by_id]
+    if missing_user_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    for user_id in normalized_user_ids:
+        _assert_admin_deactivation_allowed(target_users_by_id[user_id], admin)
+
+    for user_id in normalized_user_ids:
+        _apply_user_deactivation(db, target_users_by_id[user_id])
+
+    db.commit()
+    invalidate_admin_users_cache()
+    return {
+        "deactivatedUserIds": normalized_user_ids,
+        "count": len(normalized_user_ids),
+    }
 
 
 def list_finalize_jobs(db: Session, current_user: CurrentUser) -> dict:
@@ -190,6 +299,220 @@ def list_admin_groups(db: Session, current_user: CurrentUser, *, status: str | N
     ]
 
 
+def _serialize_admin_group_month(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return value.strftime("%b %Y")
+    except AttributeError:
+        return str(value)
+
+
+def get_admin_group(db: Session, group_id: int, current_user: CurrentUser) -> dict:
+    require_admin(current_user)
+
+    group_row = db.execute(
+        select(
+            ChitGroup.id.label("id"),
+            ChitGroup.title.label("title"),
+            ChitGroup.status.label("status"),
+            ChitGroup.installment_amount.label("monthly_amount"),
+            ChitGroup.chit_value.label("chit_value"),
+            ChitGroup.current_cycle_no.label("current_cycle_no"),
+            ChitGroup.start_date.label("start_date"),
+            ChitGroup.first_auction_date.label("first_auction_date"),
+            func.coalesce(Owner.display_name, Owner.business_name, User.phone).label("owner_name"),
+            User.phone.label("owner_phone"),
+            func.count(GroupMembership.id).label("members_count"),
+        )
+        .join(Owner, Owner.id == ChitGroup.owner_id)
+        .join(User, User.id == Owner.user_id)
+        .outerjoin(GroupMembership, GroupMembership.group_id == ChitGroup.id)
+        .where(ChitGroup.id == group_id)
+        .group_by(
+            ChitGroup.id,
+            ChitGroup.title,
+            ChitGroup.status,
+            ChitGroup.installment_amount,
+            ChitGroup.chit_value,
+            ChitGroup.current_cycle_no,
+            ChitGroup.start_date,
+            ChitGroup.first_auction_date,
+            Owner.display_name,
+            Owner.business_name,
+            User.phone,
+        )
+    ).first()
+    if group_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+
+    payments_sq = (
+        select(
+            Payment.membership_id.label("membership_id"),
+            func.count(Payment.id).label("payment_count"),
+            func.coalesce(func.sum(Payment.amount), 0).label("total_paid"),
+        )
+        .where(Payment.membership_id.is_not(None))
+        .group_by(Payment.membership_id)
+        .subquery()
+    )
+    payouts_sq = (
+        select(
+            Payout.membership_id.label("membership_id"),
+            func.count(Payout.id).label("payout_count"),
+            func.coalesce(func.sum(Payout.net_amount), 0).label("total_received"),
+        )
+        .group_by(Payout.membership_id)
+        .subquery()
+    )
+    installments_sq = (
+        select(
+            Installment.membership_id.label("membership_id"),
+            func.count(Installment.id).label("total_installments"),
+            func.sum(
+                case(
+                    (((Installment.status == "paid") | (Installment.balance_amount <= 0)), 1),
+                    else_=0,
+                )
+            ).label("paid_installments"),
+            func.sum(case((func.coalesce(Installment.balance_amount, 0) > 0, 1), else_=0)).label("pending_installments"),
+            func.coalesce(func.sum(Installment.balance_amount), 0).label("pending_amount"),
+        )
+        .group_by(Installment.membership_id)
+        .subquery()
+    )
+
+    member_rows = db.execute(
+        select(
+            GroupMembership.id.label("membership_id"),
+            User.id.label("user_id"),
+            func.coalesce(Subscriber.full_name, User.phone).label("display_name"),
+            User.phone.label("phone"),
+            GroupMembership.membership_status.label("membership_status"),
+            GroupMembership.prized_status.label("prized_status"),
+            func.coalesce(payments_sq.c.total_paid, 0).label("total_paid"),
+            func.coalesce(payouts_sq.c.total_received, 0).label("total_received"),
+            func.coalesce(installments_sq.c.total_installments, 0).label("total_installments"),
+            func.coalesce(installments_sq.c.paid_installments, 0).label("paid_installments"),
+            func.coalesce(installments_sq.c.pending_installments, 0).label("pending_installments"),
+            func.coalesce(installments_sq.c.pending_amount, 0).label("pending_amount"),
+        )
+        .join(Subscriber, Subscriber.id == GroupMembership.subscriber_id)
+        .join(User, User.id == Subscriber.user_id)
+        .outerjoin(payments_sq, payments_sq.c.membership_id == GroupMembership.id)
+        .outerjoin(payouts_sq, payouts_sq.c.membership_id == GroupMembership.id)
+        .outerjoin(installments_sq, installments_sq.c.membership_id == GroupMembership.id)
+        .where(GroupMembership.group_id == group_id)
+        .order_by(GroupMembership.member_no.asc(), GroupMembership.id.asc())
+    ).all()
+
+    members = []
+    defaulters = []
+    for row in member_rows:
+        total_paid = int(row.total_paid or 0)
+        total_received = int(row.total_received or 0)
+        payment_score = _payment_score(
+            paid_installments=int(row.paid_installments or 0),
+            total_installments=int(row.total_installments or 0),
+        )
+        member_payload = {
+            "membershipId": row.membership_id,
+            "userId": row.user_id,
+            "name": row.display_name,
+            "phone": row.phone,
+            "membershipStatus": row.membership_status,
+            "prizedStatus": row.prized_status,
+            "totalPaid": total_paid,
+            "totalReceived": total_received,
+            "netPosition": total_received - total_paid,
+            "paymentScore": payment_score,
+            "pendingPaymentsCount": int(row.pending_installments or 0),
+            "pendingAmount": int(row.pending_amount or 0),
+        }
+        members.append(member_payload)
+        if member_payload["pendingPaymentsCount"] > 1:
+            defaulters.append(
+                {
+                    "userId": member_payload["userId"],
+                    "name": member_payload["name"],
+                    "phone": member_payload["phone"],
+                    "pendingPaymentsCount": member_payload["pendingPaymentsCount"],
+                    "pendingAmount": member_payload["pendingAmount"],
+                    "paymentScore": member_payload["paymentScore"],
+                    "netPosition": member_payload["netPosition"],
+                }
+            )
+
+    total_collected = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0))
+        .join(GroupMembership, GroupMembership.id == Payment.membership_id)
+        .where(GroupMembership.group_id == group_id)
+    ) or 0
+    total_paid_out = db.scalar(
+        select(func.coalesce(func.sum(Payout.net_amount), 0))
+        .where(Payout.membership_id.in_(select(GroupMembership.id).where(GroupMembership.group_id == group_id)))
+    ) or 0
+    pending_amount = db.scalar(
+        select(func.coalesce(func.sum(Installment.balance_amount), 0)).where(Installment.group_id == group_id)
+    ) or 0
+
+    winner_name_sq = (
+        select(Subscriber.full_name)
+        .join(GroupMembership, GroupMembership.subscriber_id == Subscriber.id)
+        .where(GroupMembership.id == AuctionResult.winner_membership_id)
+        .scalar_subquery()
+    )
+    auction_rows = db.execute(
+        select(
+            AuctionSession.id.label("id"),
+            AuctionSession.cycle_no.label("cycle_no"),
+            AuctionSession.scheduled_start_at.label("scheduled_at"),
+            AuctionSession.status.label("status"),
+            winner_name_sq.label("winner_name"),
+            AuctionResult.winning_bid_amount.label("winning_bid_amount"),
+        )
+        .outerjoin(AuctionResult, AuctionResult.auction_session_id == AuctionSession.id)
+        .where(AuctionSession.group_id == group_id)
+        .order_by(AuctionSession.cycle_no.desc(), AuctionSession.id.desc())
+    ).all()
+    auctions = [
+        {
+            "id": row.id,
+            "cycleNo": int(row.cycle_no or 0),
+            "month": _serialize_admin_group_month(row.scheduled_at),
+            "winner": row.winner_name,
+            "bidAmount": int(row.winning_bid_amount) if row.winning_bid_amount is not None else None,
+            "status": row.status,
+            "scheduledAt": row.scheduled_at,
+        }
+        for row in auction_rows
+    ]
+
+    return {
+        "group": {
+            "id": group_row.id,
+            "name": group_row.title,
+            "status": group_row.status,
+            "owner": group_row.owner_name,
+            "ownerPhone": group_row.owner_phone,
+            "membersCount": int(group_row.members_count or 0),
+            "monthlyAmount": int(group_row.monthly_amount or 0),
+            "chitValue": int(group_row.chit_value or 0),
+            "currentCycleNo": int(group_row.current_cycle_no or 0),
+            "startDate": group_row.start_date,
+            "firstAuctionDate": group_row.first_auction_date,
+        },
+        "members": members,
+        "financialSummary": {
+            "totalCollected": int(total_collected or 0),
+            "totalPaid": int(total_paid_out or 0),
+            "pendingAmount": int(pending_amount or 0),
+        },
+        "auctions": auctions,
+        "defaulters": defaulters,
+    }
+
+
 def list_admin_auctions(db: Session, current_user: CurrentUser) -> list[dict]:
     require_admin(current_user)
     winner_name_sq = (
@@ -295,6 +618,80 @@ def list_admin_payments(db: Session, current_user: CurrentUser, *, status: str |
         }
         for row in rows
     ]
+
+
+def list_admin_defaulters(db: Session, current_user: CurrentUser, *, threshold: int = 1) -> list[dict]:
+    require_admin(current_user)
+    display_name = func.coalesce(Subscriber.full_name, Owner.display_name, Owner.business_name, User.phone)
+    pending_count = func.count(Installment.id)
+    pending_amount = func.coalesce(func.sum(Installment.balance_amount), 0)
+
+    rows = db.execute(
+        select(
+            User.id.label("user_id"),
+            display_name.label("display_name"),
+            User.phone.label("phone"),
+            pending_count.label("pending_count"),
+            pending_amount.label("pending_amount"),
+        )
+        .join(Subscriber, Subscriber.user_id == User.id)
+        .join(GroupMembership, GroupMembership.subscriber_id == Subscriber.id)
+        .join(Installment, Installment.membership_id == GroupMembership.id)
+        .outerjoin(Owner, Owner.user_id == User.id)
+        .where(
+            func.coalesce(Installment.balance_amount, 0) > 0,
+            func.lower(Installment.status) != "paid",
+        )
+        .group_by(User.id, Subscriber.full_name, Owner.display_name, Owner.business_name, User.phone)
+        .having(pending_count > max(int(threshold or 0), 0))
+        .order_by(pending_count.desc(), pending_amount.desc(), User.id.asc())
+    ).all()
+
+    return [
+        {
+            "userId": row.user_id,
+            "name": row.display_name,
+            "phone": row.phone,
+            "pendingPaymentsCount": int(row.pending_count or 0),
+            "pendingAmount": int(row.pending_amount or 0),
+        }
+        for row in rows
+    ]
+
+
+def list_admin_summary(db: Session, current_user: CurrentUser) -> dict:
+    require_admin(current_user)
+    pending_statuses = ["pending", "due", "scheduled"]
+
+    total_users = db.scalar(select(func.count(User.id))) or 0
+    active_groups = db.scalar(
+        select(func.count(ChitGroup.id)).where(func.lower(ChitGroup.status) == "active")
+    ) or 0
+    pending_payments = db.scalar(
+        select(func.count(Payment.id)).where(func.lower(Payment.status).in_(pending_statuses))
+    ) or 0
+
+    defaulter_groups = (
+        select(User.id.label("user_id"))
+        .join(Subscriber, Subscriber.user_id == User.id)
+        .join(GroupMembership, GroupMembership.subscriber_id == Subscriber.id)
+        .join(Installment, Installment.membership_id == GroupMembership.id)
+        .where(
+            func.coalesce(Installment.balance_amount, 0) > 0,
+            func.lower(Installment.status) != "paid",
+        )
+        .group_by(User.id)
+        .having(func.count(Installment.id) > 1)
+        .subquery()
+    )
+    defaulters = db.scalar(select(func.count()).select_from(defaulter_groups)) or 0
+
+    return {
+        "totalUsers": int(total_users),
+        "activeGroups": int(active_groups),
+        "pendingPayments": int(pending_payments),
+        "defaulters": int(defaulters),
+    }
 
 
 def _normalized_admin_role(row) -> str:
@@ -403,11 +800,18 @@ def _payouts_subquery():
     )
 
 
-def _admin_user_list_statement(*, lite: bool, role: str | None = None, active: bool | None = None, search: str | None = None):
+def _admin_user_list_statement(
+    *,
+    lite: bool,
+    role: str | None = None,
+    active: bool | None = None,
+    search: str | None = None,
+    score_range: str | None = None,
+):
     owned_chits_sq = _owned_chits_subquery()
     joined_chits_sq = _joined_chits_subquery(include_membership_stats=False)
     external_chits_sq = _external_chits_subquery()
-    installments_sq = None if lite else _installments_subquery()
+    installments_sq = None if lite and not score_range else _installments_subquery()
     display_name = func.coalesce(Owner.display_name, Owner.business_name, Subscriber.full_name, User.phone)
 
     selected_columns = [
@@ -469,6 +873,21 @@ def _admin_user_list_statement(*, lite: bool, role: str | None = None, active: b
                 func.lower(display_name).like(search_pattern),
             )
         )
+
+    normalized_score_range = (score_range or "").strip().lower() or None
+    if normalized_score_range and installments_sq is not None:
+        total_installments = func.coalesce(installments_sq.c.total_installments, 0)
+        paid_installments = func.coalesce(installments_sq.c.paid_installments, 0)
+        payment_score = case(
+            (total_installments <= 0, 0),
+            else_=(paid_installments * 100.0) / total_installments,
+        )
+        if normalized_score_range == "high":
+            statement = statement.where(payment_score >= 80)
+        elif normalized_score_range == "medium":
+            statement = statement.where(payment_score >= 50, payment_score < 80)
+        elif normalized_score_range == "low":
+            statement = statement.where(payment_score < 50)
 
     return statement
 
@@ -654,6 +1073,7 @@ def _serialize_admin_user_detail(db: Session, row, *, lite: bool) -> dict:
             "payoutCount": payout_count,
             "totalReceived": total_received,
             "netCashflow": total_received - total_paid,
+            "netPosition": total_received - total_paid,
             "paymentScore": payment_score,
         },
         "participationStats": {
@@ -681,12 +1101,13 @@ def list_admin_users(
     role: str | None = None,
     active: bool | None = None,
     search: str | None = None,
+    score_range: str | None = None,
 ):
     admin = require_admin(current_user)
     started_at = perf_counter()
     pagination = resolve_pagination(page, limit, default_page_size=20, max_page_size=200)
     assert pagination is not None
-    use_cache = role is None and active is None and not _normalize_admin_search_term(search)
+    use_cache = role is None and active is None and score_range is None and not _normalize_admin_search_term(search)
 
     cache_started_at = perf_counter()
     cached_payload = load_admin_users_cache(page, limit, lite) if use_cache else None
@@ -711,7 +1132,13 @@ def list_admin_users(
         )
         return cached_payload
 
-    statement = _admin_user_list_statement(lite=lite, role=role, active=active, search=search).order_by(User.created_at.desc(), User.id.desc())
+    statement = _admin_user_list_statement(
+        lite=lite,
+        role=role,
+        active=active,
+        search=search,
+        score_range=score_range,
+    ).order_by(User.created_at.desc(), User.id.desc())
     query_started_at = perf_counter()
     total_count = count_statement(db, statement)
     rows = db.execute(apply_pagination(statement, pagination)).all()

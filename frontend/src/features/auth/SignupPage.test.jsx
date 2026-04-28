@@ -52,7 +52,7 @@ test("creates a subscriber account, saves the session, and routes to the subscri
   await user.type(screen.getByLabelText(/^Phone number$/i), "9999999999");
   await user.type(screen.getByLabelText(/Email address/i), "asha@example.com");
   await user.type(screen.getByLabelText(/^Password$/i), "secret123");
-  await user.type(screen.getByLabelText(/Confirm password/i), "secret123");
+  await user.type(screen.getByLabelText(/^Confirm password$/i), "secret123");
   await user.click(screen.getByRole("button", { name: /Create Account/i }));
 
   await waitFor(() => {
@@ -70,4 +70,25 @@ test("creates a subscriber account, saves the session, and routes to the subscri
     }),
   );
   expect(mockNavigate).toHaveBeenCalledWith("/subscriber-dashboard");
+});
+
+test("lets the user reveal signup passwords without changing the submit payload", async () => {
+  const user = userEvent.setup();
+
+  render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <SignupPage />
+    </MemoryRouter>,
+  );
+
+  const passwordInput = screen.getByLabelText(/^Password$/i);
+  const confirmPasswordInput = screen.getByLabelText(/^Confirm password$/i);
+  expect(passwordInput).toHaveAttribute("type", "password");
+  expect(confirmPasswordInput).toHaveAttribute("type", "password");
+
+  await user.click(screen.getByRole("button", { name: /show password/i }));
+  await user.click(screen.getByRole("button", { name: /show confirm password/i }));
+
+  expect(passwordInput).toHaveAttribute("type", "text");
+  expect(confirmPasswordInput).toHaveAttribute("type", "text");
 });
