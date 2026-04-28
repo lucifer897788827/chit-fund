@@ -169,6 +169,52 @@ def test_admin_user_listing_paginates(app, db_session):
     assert len(body["items"]) == 1
 
 
+def test_admin_user_listing_filters_by_role_and_active_state(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    inactive_user = User(
+        email="inactive-owner@example.com",
+        phone="7777777710",
+        password_hash=hash_password("owner-secret"),
+        role="chit_owner",
+        is_active=False,
+    )
+    db_session.add(inactive_user)
+    db_session.flush()
+    db_session.add(
+        Owner(
+            user_id=inactive_user.id,
+            display_name="Inactive Owner",
+            business_name="Inactive Owner Chits",
+            city="Chennai",
+            state="TN",
+            status="inactive",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/admin/users?role=owner&active=false", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["totalCount"] >= 1
+    assert all(item["role"] == "owner" and item["isActive"] is False for item in body["items"])
+    assert any(item["name"] == "Inactive Owner" for item in body["items"])
+
+
+def test_admin_user_listing_searches_phone_and_name(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    response = client.get("/api/admin/users?search=subscriber%20one", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["totalCount"] >= 1
+    assert any(item["phone"] == "9999999999" or item["name"] == "Subscriber One" for item in body["items"])
+
+
 def test_admin_user_listing_uses_cache(app, db_session, monkeypatch):
     admin_service = importlib.import_module("app.modules.admin.service")
     cache_module = importlib.import_module("app.modules.admin.cache")
@@ -269,6 +315,76 @@ def test_admin_groups_endpoint_returns_group_summaries(app, db_session):
     )
 
 
+def test_admin_groups_endpoint_filters_by_status(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == 1))
+    active_group = ChitGroup(
+        owner_id=owner.id,
+        group_code="ADM-GRP-ACT",
+        title="Active Admin Group",
+        chit_value=240000,
+        installment_amount=12000,
+        member_count=20,
+        cycle_count=20,
+        cycle_frequency="monthly",
+        start_date=date(2026, 1, 1),
+        first_auction_date=date(2026, 1, 15),
+        status="active",
+    )
+    completed_group = ChitGroup(
+        owner_id=owner.id,
+        group_code="ADM-GRP-CMP",
+        title="Completed Admin Group",
+        chit_value=240000,
+        installment_amount=12000,
+        member_count=20,
+        cycle_count=20,
+        cycle_frequency="monthly",
+        start_date=date(2026, 1, 1),
+        first_auction_date=date(2026, 1, 15),
+        status="completed",
+    )
+    db_session.add_all([active_group, completed_group])
+    db_session.commit()
+
+    response = client.get("/api/admin/groups?status=completed", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert any(item["name"] == "Completed Admin Group" for item in body)
+    assert all(item["status"] == "completed" for item in body)
+
+
+def test_admin_groups_endpoint_searches_group_and_owner_name(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == 1))
+    group = ChitGroup(
+        owner_id=owner.id,
+        group_code="ADM-GRP-SRCH",
+        title="Searchable Admin Group",
+        chit_value=240000,
+        installment_amount=12000,
+        member_count=20,
+        cycle_count=20,
+        cycle_frequency="monthly",
+        start_date=date(2026, 1, 1),
+        first_auction_date=date(2026, 1, 15),
+        status="active",
+    )
+    db_session.add(group)
+    db_session.commit()
+
+    response = client.get("/api/admin/groups?search=searchable", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert any(item["name"] == "Searchable Admin Group" for item in body)
+
+
 def test_admin_auctions_endpoint_returns_auction_summaries(app, db_session):
     client = TestClient(app)
     headers = _admin_headers(client, db_session)
@@ -343,6 +459,7 @@ def test_admin_auctions_endpoint_returns_auction_summaries(app, db_session):
         and item["winner"] == "Subscriber One"
         and item["bidAmount"] == 45000
         and item["status"] == "closed"
+        and item["scheduledAt"].startswith("2026-02-15")
         for item in body
     )
 
@@ -400,7 +517,129 @@ def test_admin_payments_endpoint_returns_payment_summaries(app, db_session):
         item["id"] == payment.id
         and item["user"] == "Subscriber One"
         and item["group"] == "Payment Oversight Group"
+        and item["groupId"] == group.id
         and item["amount"] == 9000
         and item["status"] == "paid"
         for item in body
     )
+
+
+def test_admin_payments_endpoint_filters_by_status(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == 1))
+    group = ChitGroup(
+        owner_id=owner.id,
+        group_code="ADM-PAY-FLT",
+        title="Filtered Payment Group",
+        chit_value=180000,
+        installment_amount=9000,
+        member_count=20,
+        cycle_count=20,
+        cycle_frequency="monthly",
+        start_date=date(2026, 3, 1),
+        first_auction_date=date(2026, 3, 15),
+        status="active",
+    )
+    db_session.add(group)
+    db_session.flush()
+    membership = GroupMembership(
+        group_id=group.id,
+        subscriber_id=2,
+        member_no=1,
+        membership_status="active",
+        prized_status="unprized",
+        can_bid=True,
+    )
+    db_session.add(membership)
+    db_session.flush()
+    db_session.add_all(
+        [
+            Payment(
+                owner_id=owner.id,
+                subscriber_id=2,
+                membership_id=membership.id,
+                installment_id=None,
+                payment_type="installment",
+                payment_method="cash",
+                amount=9000,
+                payment_date=date(2026, 3, 5),
+                recorded_by_user_id=1,
+                status="recorded",
+            ),
+            Payment(
+                owner_id=owner.id,
+                subscriber_id=2,
+                membership_id=membership.id,
+                installment_id=None,
+                payment_type="installment",
+                payment_method="cash",
+                amount=9000,
+                payment_date=date(2026, 3, 6),
+                recorded_by_user_id=1,
+                status="pending",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get("/api/admin/payments?status=pending", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) >= 1
+    assert all(item["status"] == "pending" for item in body)
+
+
+def test_admin_payments_endpoint_searches_phone_and_name(app, db_session):
+    client = TestClient(app)
+    headers = _admin_headers(client, db_session)
+
+    owner = db_session.scalar(select(Owner).where(Owner.user_id == 1))
+    group = ChitGroup(
+        owner_id=owner.id,
+        group_code="ADM-PAY-SRCH",
+        title="Search Payment Group",
+        chit_value=180000,
+        installment_amount=9000,
+        member_count=20,
+        cycle_count=20,
+        cycle_frequency="monthly",
+        start_date=date(2026, 3, 1),
+        first_auction_date=date(2026, 3, 15),
+        status="active",
+    )
+    db_session.add(group)
+    db_session.flush()
+    membership = GroupMembership(
+        group_id=group.id,
+        subscriber_id=2,
+        member_no=1,
+        membership_status="active",
+        prized_status="unprized",
+        can_bid=True,
+    )
+    db_session.add(membership)
+    db_session.flush()
+    db_session.add(
+        Payment(
+            owner_id=owner.id,
+            subscriber_id=2,
+            membership_id=membership.id,
+            installment_id=None,
+            payment_type="installment",
+            payment_method="cash",
+            amount=9000,
+            payment_date=date(2026, 3, 5),
+            recorded_by_user_id=1,
+            status="recorded",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/admin/payments?search=subscriber%20one", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert any(item["user"] == "Subscriber One" for item in body)

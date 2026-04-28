@@ -4,7 +4,7 @@ import logging
 from time import perf_counter
 
 from fastapi import HTTPException, status
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.bootstrap import build_runtime_readiness_report
@@ -131,9 +131,17 @@ def create_admin_message(db: Session, payload: AdminMessageCreate, current_user:
     return _serialize_admin_message(message)
 
 
-def list_admin_groups(db: Session, current_user: CurrentUser) -> list[dict]:
+def _normalize_admin_search_term(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+def list_admin_groups(db: Session, current_user: CurrentUser, *, status: str | None = None, search: str | None = None) -> list[dict]:
     require_admin(current_user)
-    rows = db.execute(
+    normalized_status = (status or "").strip().lower() or None
+    normalized_search = _normalize_admin_search_term(search)
+
+    statement = (
         select(
             ChitGroup.id.label("id"),
             ChitGroup.title.label("title"),
@@ -155,7 +163,19 @@ def list_admin_groups(db: Session, current_user: CurrentUser) -> list[dict]:
             ChitGroup.installment_amount,
         )
         .order_by(ChitGroup.created_at.desc(), ChitGroup.id.desc())
-    ).all()
+    )
+    if normalized_status:
+        statement = statement.where(func.lower(ChitGroup.status) == normalized_status)
+    if normalized_search:
+        search_pattern = f"%{normalized_search}%"
+        statement = statement.where(
+            or_(
+                func.lower(ChitGroup.title).like(search_pattern),
+                func.lower(func.coalesce(Owner.display_name, Owner.business_name, User.phone)).like(search_pattern),
+            )
+        )
+
+    rows = db.execute(statement).all()
 
     return [
         {
@@ -192,6 +212,7 @@ def list_admin_auctions(db: Session, current_user: CurrentUser) -> list[dict]:
             AuctionSession.id.label("id"),
             ChitGroup.title.label("group_title"),
             AuctionSession.status.label("status"),
+            AuctionSession.scheduled_start_at.label("scheduled_start_at"),
             winner_name_sq.label("winner_name"),
             func.coalesce(AuctionResult.winning_bid_amount, latest_bid_amount_sq).label("bid_amount"),
         )
@@ -207,6 +228,7 @@ def list_admin_auctions(db: Session, current_user: CurrentUser) -> list[dict]:
             "winner": row.winner_name,
             "bidAmount": int(row.bid_amount) if row.bid_amount is not None else None,
             "status": row.status,
+            "scheduledAt": row.scheduled_start_at,
         }
         for row in rows
     ]
@@ -219,9 +241,12 @@ def _normalize_admin_payment_status(status_value: str | None) -> str:
     return "paid"
 
 
-def list_admin_payments(db: Session, current_user: CurrentUser) -> list[dict]:
+def list_admin_payments(db: Session, current_user: CurrentUser, *, status: str | None = None, search: str | None = None) -> list[dict]:
     require_admin(current_user)
-    rows = db.execute(
+    normalized_status = (status or "").strip().lower() or None
+    normalized_search = _normalize_admin_search_term(search)
+
+    statement = (
         select(
             Payment.id.label("id"),
             Payment.amount.label("amount"),
@@ -229,6 +254,7 @@ def list_admin_payments(db: Session, current_user: CurrentUser) -> list[dict]:
             Subscriber.full_name.label("subscriber_name"),
             User.phone.label("subscriber_phone"),
             ChitGroup.title.label("group_title"),
+            ChitGroup.id.label("group_id"),
         )
         .join(Subscriber, Subscriber.id == Payment.subscriber_id)
         .join(User, User.id == Subscriber.user_id)
@@ -239,13 +265,31 @@ def list_admin_payments(db: Session, current_user: CurrentUser) -> list[dict]:
             ChitGroup.id == func.coalesce(GroupMembership.group_id, Installment.group_id),
         )
         .order_by(Payment.payment_date.desc(), Payment.id.desc())
-    ).all()
+    )
+    if normalized_status:
+        pending_statuses = ["pending", "due", "scheduled"]
+        if normalized_status == "pending":
+            statement = statement.where(func.lower(Payment.status).in_(pending_statuses))
+        elif normalized_status == "paid":
+            statement = statement.where(~func.lower(Payment.status).in_(pending_statuses))
+    if normalized_search:
+        search_pattern = f"%{normalized_search}%"
+        statement = statement.where(
+            or_(
+                func.lower(func.coalesce(Subscriber.full_name, User.phone)).like(search_pattern),
+                func.lower(User.phone).like(search_pattern),
+                func.lower(func.coalesce(ChitGroup.title, "")).like(search_pattern),
+            )
+        )
+
+    rows = db.execute(statement).all()
 
     return [
         {
             "id": row.id,
             "user": row.subscriber_name or row.subscriber_phone,
             "group": row.group_title,
+            "groupId": row.group_id,
             "amount": int(row.amount or 0),
             "status": _normalize_admin_payment_status(row.status),
         }
@@ -359,19 +403,22 @@ def _payouts_subquery():
     )
 
 
-def _admin_user_list_statement(*, lite: bool):
+def _admin_user_list_statement(*, lite: bool, role: str | None = None, active: bool | None = None, search: str | None = None):
     owned_chits_sq = _owned_chits_subquery()
     joined_chits_sq = _joined_chits_subquery(include_membership_stats=False)
     external_chits_sq = _external_chits_subquery()
     installments_sq = None if lite else _installments_subquery()
+    display_name = func.coalesce(Owner.display_name, Owner.business_name, Subscriber.full_name, User.phone)
 
     selected_columns = [
         User.id.label("id"),
         User.phone.label("phone"),
         User.role.label("role"),
+        User.is_active.label("is_active"),
         User.created_at.label("created_at"),
         Owner.id.label("owner_id"),
         Subscriber.id.label("subscriber_id"),
+        display_name.label("display_name"),
         func.coalesce(owned_chits_sq.c.owned_chits, 0).label("owned_chits"),
         func.coalesce(joined_chits_sq.c.joined_chits, 0).label("joined_chits"),
         func.coalesce(external_chits_sq.c.external_chits, 0).label("external_chits"),
@@ -401,6 +448,28 @@ def _admin_user_list_statement(*, lite: bool):
     )
     if installments_sq is not None:
         statement = statement.outerjoin(installments_sq, installments_sq.c.user_id == User.id)
+
+    normalized_role = (role or "").strip().lower() or None
+    if normalized_role == "owner":
+        statement = statement.where(Owner.id.is_not(None))
+    elif normalized_role == "subscriber":
+        statement = statement.where(Subscriber.id.is_not(None))
+    elif normalized_role == "admin":
+        statement = statement.where(User.role == "admin")
+
+    if active is not None:
+        statement = statement.where(User.is_active.is_(active))
+
+    normalized_search = _normalize_admin_search_term(search)
+    if normalized_search:
+        search_pattern = f"%{normalized_search}%"
+        statement = statement.where(
+            or_(
+                func.lower(User.phone).like(search_pattern),
+                func.lower(display_name).like(search_pattern),
+            )
+        )
+
     return statement
 
 
@@ -451,7 +520,9 @@ def _serialize_admin_user_list_item(row) -> dict:
     return {
         "id": row.id,
         "role": _normalized_admin_role(row),
+        "name": row.display_name,
         "phone": row.phone,
+        "isActive": bool(row.is_active),
         "createdAt": row.created_at,
         "totalChits": total_chits,
         "paymentScore": _payment_score(
@@ -600,14 +671,25 @@ def _serialize_admin_user_detail(db: Session, row, *, lite: bool) -> dict:
     }
 
 
-def list_admin_users(db: Session, current_user: CurrentUser, *, page: int, limit: int, lite: bool):
+def list_admin_users(
+    db: Session,
+    current_user: CurrentUser,
+    *,
+    page: int,
+    limit: int,
+    lite: bool,
+    role: str | None = None,
+    active: bool | None = None,
+    search: str | None = None,
+):
     admin = require_admin(current_user)
     started_at = perf_counter()
     pagination = resolve_pagination(page, limit, default_page_size=20, max_page_size=200)
     assert pagination is not None
+    use_cache = role is None and active is None and not _normalize_admin_search_term(search)
 
     cache_started_at = perf_counter()
-    cached_payload = load_admin_users_cache(page, limit, lite)
+    cached_payload = load_admin_users_cache(page, limit, lite) if use_cache else None
     cache_lookup_ms = round((perf_counter() - cache_started_at) * 1000, 2)
     if isinstance(cached_payload, dict):
         duration_ms = round((perf_counter() - started_at) * 1000, 2)
@@ -629,7 +711,7 @@ def list_admin_users(db: Session, current_user: CurrentUser, *, page: int, limit
         )
         return cached_payload
 
-    statement = _admin_user_list_statement(lite=lite).order_by(User.created_at.desc(), User.id.desc())
+    statement = _admin_user_list_statement(lite=lite, role=role, active=active, search=search).order_by(User.created_at.desc(), User.id.desc())
     query_started_at = perf_counter()
     total_count = count_statement(db, statement)
     rows = db.execute(apply_pagination(statement, pagination)).all()
@@ -641,7 +723,8 @@ def list_admin_users(db: Session, current_user: CurrentUser, *, page: int, limit
     duration_ms = round((perf_counter() - started_at) * 1000, 2)
 
     payload = build_paginated_response(summaries, pagination, total_count).model_dump(mode="json")
-    store_admin_users_cache(page, limit, lite, payload)
+    if use_cache:
+        store_admin_users_cache(page, limit, lite, payload)
 
     logger.info(
         "ADMIN USERS: cache=miss db=%s ms processing=%s ms total=%s ms lite=%s",

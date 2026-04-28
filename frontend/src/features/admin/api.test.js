@@ -3,6 +3,7 @@ import { apiClient } from "../../lib/api/client";
 import {
   fetchActiveAdminMessage,
   fetchAdminAuctions,
+  fetchAdminDashboardOverview,
   fetchAdminGroups,
   fetchAdminPayments,
   fetchAdminUser,
@@ -61,6 +62,24 @@ test("fetchAdminUsers loads the paginated admin user directory", async () => {
   });
 });
 
+test("fetchAdminUsers forwards admin list filters without changing the API shape", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: {
+      items: [{ id: 8, role: "owner", name: "Owner One", phone: "7777777777", isActive: false, totalChits: 4, paymentScore: 50 }],
+      page: 1,
+      pageSize: 20,
+      totalCount: 1,
+      totalPages: 1,
+    },
+  });
+
+  await fetchAdminUsers({ page: 1, limit: 20, role: "owner", active: false });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/users", {
+    params: { page: 1, limit: 20, lite: false, role: "owner", active: false },
+  });
+});
+
 test("fetchAdminUser loads one admin user detail payload", async () => {
   apiClient.get.mockResolvedValueOnce({
     data: {
@@ -97,16 +116,64 @@ test("fetchAdminGroups loads read-only admin group oversight data", async () => 
   expect(apiClient.get).toHaveBeenCalledWith("/admin/groups");
 });
 
+test("fetchAdminGroups forwards status filters for admin oversight", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [{ id: 12, name: "Closed Group", status: "completed", owner: "Owner Two", membersCount: 20, monthlyAmount: 6000 }],
+  });
+
+  await fetchAdminGroups({ status: "completed" });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/groups", {
+    params: { status: "completed" },
+  });
+});
+
 test("fetchAdminAuctions loads read-only admin auction oversight data", async () => {
   apiClient.get.mockResolvedValueOnce({
-    data: [{ id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed" }],
+    data: [{ id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed", scheduledAt: "2026-04-28T10:00:00Z" }],
   });
 
   await expect(fetchAdminAuctions()).resolves.toEqual([
-    { id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed" },
+    { id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed", scheduledAt: "2026-04-28T10:00:00Z" },
   ]);
 
   expect(apiClient.get).toHaveBeenCalledWith("/admin/auctions");
+});
+
+test("fetchAdminDashboardOverview combines admin list signals into dashboard metrics", async () => {
+  apiClient.get
+    .mockResolvedValueOnce({
+      data: {
+        items: [{ id: 1 }],
+        page: 1,
+        pageSize: 1,
+        totalCount: 12,
+        totalPages: 12,
+      },
+    })
+    .mockResolvedValueOnce({
+      data: [
+        { id: 11, status: "active" },
+        { id: 12, status: "completed" },
+        { id: 13, status: "active" },
+      ],
+    })
+    .mockResolvedValueOnce({
+      data: [{ id: 31, user: "Subscriber One", group: "Alpha Group", amount: 9000, status: "pending" }],
+    })
+    .mockResolvedValueOnce({
+      data: [
+        { id: 21, group: "Alpha Group", winner: "Subscriber One", bidAmount: 45000, status: "closed", scheduledAt: "2026-04-28T10:00:00Z" },
+        { id: 22, group: "Beta Group", winner: "Subscriber Two", bidAmount: 42000, status: "open", scheduledAt: "2026-04-27T10:00:00Z" },
+      ],
+    });
+
+  await expect(fetchAdminDashboardOverview("2026-04-28")).resolves.toEqual({
+    totalUsers: 12,
+    activeGroups: 2,
+    pendingPayments: 1,
+    todayAuctions: 1,
+  });
 });
 
 test("fetchAdminPayments loads read-only admin payment oversight data", async () => {
@@ -119,4 +186,16 @@ test("fetchAdminPayments loads read-only admin payment oversight data", async ()
   ]);
 
   expect(apiClient.get).toHaveBeenCalledWith("/admin/payments");
+});
+
+test("fetchAdminPayments forwards payment status filters for admin oversight", async () => {
+  apiClient.get.mockResolvedValueOnce({
+    data: [{ id: 32, user: "Subscriber Two", group: "Beta Group", amount: 9500, status: "pending" }],
+  });
+
+  await fetchAdminPayments({ status: "pending" });
+
+  expect(apiClient.get).toHaveBeenCalledWith("/admin/payments", {
+    params: { status: "pending" },
+  });
 });

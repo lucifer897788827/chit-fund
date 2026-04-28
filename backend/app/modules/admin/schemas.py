@@ -38,12 +38,14 @@ class AdminAuctionSummaryResponse(BaseModel):
     winner: str | None = None
     bidAmount: int | None = None
     status: str
+    scheduledAt: datetime | None = None
 
 
 class AdminPaymentSummaryResponse(BaseModel):
     id: int
     user: str
     group: str | None = None
+    groupId: int | None = None
     amount: int
     status: str
 
@@ -51,7 +53,9 @@ class AdminPaymentSummaryResponse(BaseModel):
 class AdminUserSummaryResponse(BaseModel):
     id: int
     role: str
+    name: str | None = None
     phone: str
+    isActive: bool
     createdAt: datetime
     totalChits: int
     paymentScore: int

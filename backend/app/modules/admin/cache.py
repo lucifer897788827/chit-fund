@@ -5,7 +5,7 @@ import time
 from app.core.redis import redis_client
 
 ADMIN_USERS_CACHE_TTL_SECONDS = 15
-ADMIN_USERS_VERSION_KEY = "admin_users:version"
+ADMIN_USERS_VERSION_KEY = "admin_users:version:v2"
 
 
 def _current_cache_version() -> str:
