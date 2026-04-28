@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import CurrentUser, require_owner
 from app.models.chit import ChitGroup, GroupMembership, MembershipSlot
 from app.models.user import Subscriber
+from app.modules.groups.slot_service import get_group_capacity_summary
 
 
 @dataclass(slots=True)
@@ -26,19 +27,6 @@ def _normalize_requested_slot_count(payload) -> int:
             detail="Slot count must be at least 1",
         )
     return requested_slot_count
-
-
-def _get_group_occupied_slot_count(db: Session, *, group_id: int) -> int:
-    slot_count = db.scalar(
-        select(func.count(MembershipSlot.id)).where(MembershipSlot.group_id == group_id)
-    )
-    if slot_count:
-        return int(slot_count)
-
-    membership_count = db.scalar(
-        select(func.count(GroupMembership.id)).where(GroupMembership.group_id == group_id)
-    )
-    return int(membership_count or 0)
 
 
 def validate_membership_creation(db: Session, group_id: int, payload, current_user: CurrentUser) -> ValidatedMembershipCreateContext:
@@ -95,8 +83,8 @@ def validate_membership_creation(db: Session, group_id: int, payload, current_us
             detail="Member number is already assigned to this subscriber",
         )
 
-    occupied_slot_count = _get_group_occupied_slot_count(db, group_id=group.id)
-    if occupied_slot_count + requested_slot_count > group.member_count:
+    capacity_summary = get_group_capacity_summary(db, group=group)
+    if capacity_summary.occupied_slots + requested_slot_count > group.member_count:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Group is full")
     if payload.memberNo < 1 or payload.memberNo > group.member_count:
         raise HTTPException(

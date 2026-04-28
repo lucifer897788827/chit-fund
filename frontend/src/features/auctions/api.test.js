@@ -3,9 +3,13 @@ import { apiClient } from "../../lib/api/client";
 import {
   acceptGroupInvite,
   approveGroupMembershipRequest,
+  approveGroupJoinRequest,
+  createGroupInvite,
   createGroup,
   closeGroupCollection,
+  fetchGroupInvites,
   fetchGroupMemberSummary,
+  fetchGroupJoinRequests,
   fetchGroups,
   fetchGroupStatus,
   fetchOwnerAuctionConsole,
@@ -15,13 +19,19 @@ import {
   inviteSubscriberToGroup,
   finalizeAuctionSession,
   rejectGroupInvite,
+  rejectGroupJoinRequest,
   rejectGroupMembershipRequest,
   requestGroupMembership,
+  removeGroupMember,
+  revokeGroupInvite,
+  searchGroupInviteCandidates,
+  updateGroupSettings,
 } from "./api";
 
 jest.mock("../../lib/api/client", () => ({
   apiClient: {
     get: jest.fn(),
+    patch: jest.fn(),
     post: jest.fn(),
   },
 }));
@@ -47,7 +57,7 @@ test("fetchPublicChits requests the global public chit listing", async () => {
 
   await expect(fetchPublicChits()).resolves.toEqual([{ id: 21, title: "Public Chit" }]);
 
-  expect(apiClient.get).toHaveBeenCalledWith("/chits/public");
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/public");
 });
 
 test("searchChitsByCode requests exact group-code matches from the backend", async () => {
@@ -57,7 +67,7 @@ test("searchChitsByCode requests exact group-code matches from the backend", asy
 
   await expect(searchChitsByCode("JOIN-777")).resolves.toEqual([{ id: 31, title: "Code Match Chit" }]);
 
-  expect(apiClient.get).toHaveBeenCalledWith("/chits/code/JOIN-777");
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/code/JOIN-777");
 });
 
 test("fetchOwnerMembershipRequests loads the pending owner review queue", async () => {
@@ -69,7 +79,7 @@ test("fetchOwnerMembershipRequests loads the pending owner review queue", async 
     { membershipId: 41, groupId: 21, subscriberName: "Asha Devi" },
   ]);
 
-  expect(apiClient.get).toHaveBeenCalledWith("/chits/owner/requests");
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/owner/requests");
 });
 
 test("requestGroupMembership submits a join request for a public chit", async () => {
@@ -83,7 +93,7 @@ test("requestGroupMembership submits a join request for a public chit", async ()
     membershipStatus: "pending",
   });
 
-  expect(apiClient.post).toHaveBeenCalledWith("/chits/21/request");
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/21/request");
 });
 
 test("inviteSubscriberToGroup posts a private-group phone invite", async () => {
@@ -97,7 +107,7 @@ test("inviteSubscriberToGroup posts a private-group phone invite", async () => {
     membershipStatus: "invited",
   });
 
-  expect(apiClient.post).toHaveBeenCalledWith("/chits/22/invite", {
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/22/invite-by-phone", {
     phone: "8888888888",
   });
 });
@@ -112,7 +122,7 @@ test("acceptGroupInvite posts the subscriber acceptance decision", async () => {
     membershipStatus: "active",
   });
 
-  expect(apiClient.post).toHaveBeenCalledWith("/chits/22/accept-invite", {
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/22/accept-invite", {
     membershipId: 61,
   });
 });
@@ -127,7 +137,7 @@ test("rejectGroupInvite posts the subscriber rejection decision", async () => {
     membershipStatus: "rejected",
   });
 
-  expect(apiClient.post).toHaveBeenCalledWith("/chits/22/reject-invite", {
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/22/reject-invite", {
     membershipId: 61,
   });
 });
@@ -142,8 +152,23 @@ test("approveGroupMembershipRequest posts the owner approval decision", async ()
     membershipStatus: "active",
   });
 
-  expect(apiClient.post).toHaveBeenCalledWith("/chits/21/approve-member", {
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/21/approve-membership-request", {
     membershipId: 51,
+  });
+});
+
+test("rejectGroupJoinRequest posts the owner rejection decision for the redesigned flow", async () => {
+  apiClient.post.mockResolvedValue({
+    data: { id: 91, status: "rejected" },
+  });
+
+  await expect(rejectGroupJoinRequest(21, 91)).resolves.toEqual({
+    id: 91,
+    status: "rejected",
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/21/reject-member", {
+    joinRequestId: 91,
   });
 });
 
@@ -157,7 +182,7 @@ test("rejectGroupMembershipRequest posts the owner rejection decision", async ()
     membershipStatus: "rejected",
   });
 
-  expect(apiClient.post).toHaveBeenCalledWith("/chits/21/reject-member", {
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/21/reject-membership-request", {
     membershipId: 51,
   });
 });
@@ -171,7 +196,11 @@ test("createGroup posts a new group payload", async () => {
     installmentAmount: 25000,
     memberCount: 20,
     cycleCount: 20,
+    autoCycleCalculation: false,
     cycleFrequency: "monthly",
+    commissionType: "NONE",
+    auctionType: "LIVE",
+    groupType: "STANDARD",
     visibility: "public",
     startDate: "2026-05-01",
     firstAuctionDate: "2026-05-10",
@@ -183,6 +212,30 @@ test("createGroup posts a new group payload", async () => {
   await expect(createGroup(payload)).resolves.toEqual({ id: 11, ...payload });
 
   expect(apiClient.post).toHaveBeenCalledWith("/groups", payload);
+});
+
+test("updateGroupSettings patches group configuration", async () => {
+  apiClient.patch = jest.fn().mockResolvedValue({
+    data: {
+      id: 42,
+      commissionType: "FIRST_MONTH",
+      auctionType: "BLIND",
+    },
+  });
+
+  await expect(updateGroupSettings(42, {
+    commissionType: "FIRST_MONTH",
+    auctionType: "BLIND",
+  })).resolves.toEqual({
+    id: 42,
+    commissionType: "FIRST_MONTH",
+    auctionType: "BLIND",
+  });
+
+  expect(apiClient.patch).toHaveBeenCalledWith("/groups/42", {
+    commissionType: "FIRST_MONTH",
+    auctionType: "BLIND",
+  });
 });
 
 test("fetchGroupStatus requests backend lifecycle status for a group", async () => {
@@ -231,6 +284,162 @@ test("fetchGroupMemberSummary requests backend member summaries for a group", as
   ]);
 
   expect(apiClient.get).toHaveBeenCalledWith("/groups/42/member-summary");
+});
+
+test("fetchGroupJoinRequests requests pending join requests for a group", async () => {
+  apiClient.get.mockResolvedValue({
+    data: [
+      {
+        id: 91,
+        groupId: 42,
+        subscriberId: 77,
+        subscriberName: "Asha Devi",
+        requestedSlotCount: 2,
+        status: "pending",
+      },
+    ],
+  });
+
+  await expect(fetchGroupJoinRequests(42)).resolves.toEqual([
+    {
+      id: 91,
+      groupId: 42,
+      subscriberId: 77,
+      subscriberName: "Asha Devi",
+      requestedSlotCount: 2,
+      status: "pending",
+    },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/42/join-requests");
+});
+
+test("searchGroupInviteCandidates requests searchable subscriber results for a group", async () => {
+  apiClient.get.mockResolvedValue({
+    data: [
+      {
+        subscriberId: 77,
+        fullName: "Asha Devi",
+        phone: "8888888888",
+        membershipStatus: null,
+        inviteEligible: true,
+      },
+    ],
+  });
+
+  await expect(searchGroupInviteCandidates(42, "asha")).resolves.toEqual([
+    {
+      subscriberId: 77,
+      fullName: "Asha Devi",
+      phone: "8888888888",
+      membershipStatus: null,
+      inviteEligible: true,
+    },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/42/search-users", {
+    params: { q: "asha" },
+  });
+});
+
+test("createGroupInvite posts the selected subscriber invite for a group", async () => {
+  apiClient.post.mockResolvedValue({
+    data: {
+      membershipId: 61,
+      groupId: 42,
+      subscriberId: 77,
+      subscriberName: "Asha Devi",
+      membershipStatus: "invited",
+    },
+  });
+
+  await expect(createGroupInvite(42, 77)).resolves.toEqual({
+    membershipId: 61,
+    groupId: 42,
+    subscriberId: 77,
+    subscriberName: "Asha Devi",
+    membershipStatus: "invited",
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/42/invite", {
+    subscriberId: 77,
+  });
+});
+
+test("fetchGroupInvites requests invite audit records for a group", async () => {
+  apiClient.get.mockResolvedValue({
+    data: [
+      {
+        inviteId: 71,
+        subscriberName: "Asha Devi",
+        status: "pending",
+      },
+    ],
+  });
+
+  await expect(fetchGroupInvites(42)).resolves.toEqual([
+    {
+      inviteId: 71,
+      subscriberName: "Asha Devi",
+      status: "pending",
+    },
+  ]);
+
+  expect(apiClient.get).toHaveBeenCalledWith("/groups/42/invites");
+});
+
+test("revokeGroupInvite posts owner invite revocation", async () => {
+  apiClient.post.mockResolvedValue({
+    data: {
+      inviteId: 71,
+      status: "revoked",
+    },
+  });
+
+  await expect(revokeGroupInvite(42, 71)).resolves.toEqual({
+    inviteId: 71,
+    status: "revoked",
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/42/invites/71/revoke");
+});
+
+test("removeGroupMember posts the owner removal action for a membership", async () => {
+  apiClient.post.mockResolvedValue({
+    data: {
+      membershipId: 81,
+      groupId: 42,
+      subscriberId: 77,
+      membershipStatus: "removed",
+      slotsReleased: 2,
+    },
+  });
+
+  await expect(removeGroupMember(42, 81)).resolves.toEqual({
+    membershipId: 81,
+    groupId: 42,
+    subscriberId: 77,
+    membershipStatus: "removed",
+    slotsReleased: 2,
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/42/memberships/81/remove");
+});
+
+test("approveGroupJoinRequest posts owner approval for a join request", async () => {
+  apiClient.post.mockResolvedValue({
+    data: { id: 81, membershipStatus: "active", slotCount: 2 },
+  });
+
+  await expect(approveGroupJoinRequest(42, 91)).resolves.toEqual({
+    id: 81,
+    membershipStatus: "active",
+    slotCount: 2,
+  });
+
+  expect(apiClient.post).toHaveBeenCalledWith("/groups/42/approve-member", {
+    joinRequestId: 91,
+  });
 });
 
 test("closeGroupCollection posts backend collection close command", async () => {

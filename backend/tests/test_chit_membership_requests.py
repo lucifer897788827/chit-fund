@@ -7,6 +7,13 @@ from app.models.chit import ChitGroup, GroupMembership, Installment, MembershipS
 from app.models.user import Owner
 
 
+def _assert_legacy_chit_headers(response) -> None:
+    assert response.headers["Deprecation"] == "true"
+    assert response.headers["Sunset"]
+    assert "/api/groups" in response.headers["Link"]
+    assert "299" in response.headers["Warning"]
+
+
 def _owner_headers(client: TestClient) -> dict[str, str]:
     response = client.post(
         "/api/auth/login",
@@ -59,6 +66,7 @@ def test_subscriber_can_request_and_owner_can_approve_membership(app, db_session
         headers=_subscriber_headers(client),
     )
     assert request_response.status_code == 200
+    _assert_legacy_chit_headers(request_response)
     membership_id = request_response.json()["membershipId"]
     assert request_response.json()["membershipStatus"] == "pending"
 
@@ -67,6 +75,7 @@ def test_subscriber_can_request_and_owner_can_approve_membership(app, db_session
         headers=_owner_headers(client),
     )
     assert owner_requests_response.status_code == 200
+    _assert_legacy_chit_headers(owner_requests_response)
     assert owner_requests_response.json()[0]["membershipId"] == membership_id
 
     approve_response = client.post(
@@ -75,6 +84,7 @@ def test_subscriber_can_request_and_owner_can_approve_membership(app, db_session
         json={"membershipId": membership_id},
     )
     assert approve_response.status_code == 200
+    _assert_legacy_chit_headers(approve_response)
     assert approve_response.json()["membershipStatus"] == "active"
     assert approve_response.json()["slotCount"] == 1
 
@@ -95,6 +105,7 @@ def test_owner_can_reject_membership_request(app, db_session):
         f"/api/chits/{group.id}/request",
         headers=_subscriber_headers(client),
     )
+    _assert_legacy_chit_headers(request_response)
     membership_id = request_response.json()["membershipId"]
 
     reject_response = client.post(
@@ -103,6 +114,7 @@ def test_owner_can_reject_membership_request(app, db_session):
         json={"membershipId": membership_id},
     )
     assert reject_response.status_code == 200
+    _assert_legacy_chit_headers(reject_response)
     assert reject_response.json()["membershipStatus"] == "rejected"
     assert reject_response.json()["memberNo"] < 0
 
@@ -121,5 +133,7 @@ def test_subscriber_cannot_create_duplicate_pending_membership_request(app, db_s
     second_response = client.post(f"/api/chits/{group.id}/request", headers=headers)
 
     assert first_response.status_code == 200
+    _assert_legacy_chit_headers(first_response)
     assert second_response.status_code == 409
+    _assert_legacy_chit_headers(second_response)
     assert second_response.json()["detail"] == "Membership request is already pending"

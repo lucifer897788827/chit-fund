@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.models.auction import AuctionBid, AuctionResult, AuctionSession
-from app.models.chit import ChitGroup, GroupMembership, Installment, MembershipSlot
+from app.models.chit import ChitGroup, GroupJoinRequest, GroupMembership, Installment, MembershipSlot
 from app.models.external import ExternalChit
 from app.models.money import Payment, Payout
 from app.models.user import Owner, Subscriber, User
@@ -132,6 +132,130 @@ def test_create_group_persists_penalty_configuration(app, db_session):
     assert group.grace_period_days == 3
 
 
+def test_create_group_persists_configuration_and_auto_cycle_count(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "CFG-001",
+            "title": "Configured Group",
+            "chitValue": 600000,
+            "installmentAmount": 25000,
+            "memberCount": 24,
+            "cycleCount": 3,
+            "autoCycleCalculation": True,
+            "cycleFrequency": "monthly",
+            "commissionType": "FIRST_MONTH",
+            "auctionType": "BLIND",
+            "groupType": "MULTI_SLOT",
+            "startDate": "2026-05-01",
+            "firstAuctionDate": "2026-05-10",
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["commissionType"] == "FIRST_MONTH"
+    assert body["auctionType"] == "BLIND"
+    assert body["groupType"] == "MULTI_SLOT"
+    assert body["autoCycleCalculation"] is True
+    assert body["cycleCount"] == 24
+
+    group = db_session.scalar(select(ChitGroup).where(ChitGroup.group_code == "CFG-001"))
+    assert group is not None
+    assert group.commission_type == "FIRST_MONTH"
+    assert group.auction_type == "BLIND"
+    assert group.group_type == "MULTI_SLOT"
+    assert group.auto_cycle_calculation is True
+    assert group.cycle_count == 24
+
+
+def test_owner_can_update_group_settings(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "CFG-UPD-001",
+            "title": "Config Update Group",
+            "chitValue": 500000,
+            "installmentAmount": 25000,
+            "memberCount": 20,
+            "cycleCount": 20,
+            "cycleFrequency": "monthly",
+            "commissionType": "NONE",
+            "auctionType": "LIVE",
+            "startDate": "2026-05-01",
+            "firstAuctionDate": "2026-05-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    update_response = client.patch(
+        f"/api/groups/{group_id}",
+        headers=headers,
+        json={
+            "commissionType": "FIRST_MONTH",
+            "auctionType": "BLIND",
+        },
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["commissionType"] == "FIRST_MONTH"
+    assert update_response.json()["auctionType"] == "BLIND"
+
+    group = db_session.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    assert group is not None
+    assert group.commission_type == "FIRST_MONTH"
+    assert group.auction_type == "BLIND"
+
+
+def test_owner_cannot_update_group_settings_after_group_has_started(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "CFG-LOCK-001",
+            "title": "Locked Config Group",
+            "chitValue": 500000,
+            "installmentAmount": 25000,
+            "memberCount": 20,
+            "cycleCount": 20,
+            "cycleFrequency": "monthly",
+            "commissionType": "NONE",
+            "auctionType": "LIVE",
+            "startDate": "2026-05-01",
+            "firstAuctionDate": "2026-05-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    group = db_session.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    assert group is not None
+    group.collection_closed = True
+    db_session.commit()
+
+    update_response = client.patch(
+        f"/api/groups/{group_id}",
+        headers=headers,
+        json={
+            "commissionType": "FIRST_MONTH",
+            "auctionType": "BLIND",
+        },
+    )
+
+    assert update_response.status_code == 409
+    assert update_response.json()["detail"] == "Group settings are locked after the group has started"
+
+
 def test_create_group_accepts_public_visibility(app, db_session):
     client = TestClient(app)
     headers = _owner_headers(client)
@@ -223,6 +347,10 @@ def test_public_chits_endpoint_returns_only_public_active_groups(app, db_session
     response = client.get("/api/chits/public")
 
     assert response.status_code == 200
+    assert response.headers["Deprecation"] == "true"
+    assert response.headers["Sunset"]
+    assert "/api/groups" in response.headers["Link"]
+    assert "299" in response.headers["Warning"]
     assert [group["groupCode"] for group in response.json()] == ["PUBLIC-OPEN"]
 
 
@@ -418,10 +546,502 @@ def test_close_collection_persists_group_lifecycle_state(app, db_session):
     assert response.status_code == 200
     assert response.json()["collectionClosed"] is True
     assert response.json()["currentMonthStatus"] == "COLLECTION_CLOSED"
-    group = db_session.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
-    assert group is not None
-    assert group.collection_closed is True
-    assert group.current_month_status == "COLLECTION_CLOSED"
+
+
+def test_subscriber_can_create_join_request_and_owner_can_list_and_approve_it(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "JOINREQ-001",
+            "title": "Join Request Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "groupType": "MULTI_SLOT",
+            "visibility": "public",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    request_response = client.post(
+        f"/api/groups/{group_id}/join-request",
+        headers=_subscriber_headers(client),
+        json={"slotCount": 3},
+    )
+
+    assert request_response.status_code == 201
+    request_body = request_response.json()
+    assert request_body["groupId"] == group_id
+    assert request_body["subscriberId"] == 2
+    assert request_body["requestedSlotCount"] == 3
+    assert request_body["paymentScore"] is None
+    assert request_body["status"] == "pending"
+
+    list_response = client.get(
+        f"/api/groups/{group_id}/join-requests",
+        headers=headers,
+    )
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+    assert list_response.json()[0]["id"] == request_body["id"]
+    assert list_response.json()[0]["paymentScore"] is None
+
+    approve_response = client.post(
+        f"/api/groups/{group_id}/approve-member",
+        headers=headers,
+        json={"joinRequestId": request_body["id"]},
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["membershipStatus"] == "active"
+    assert approve_response.json()["slotCount"] == 3
+
+    join_request = db_session.scalar(select(GroupJoinRequest).where(GroupJoinRequest.id == request_body["id"]))
+    membership = db_session.scalar(
+        select(GroupMembership).where(
+            GroupMembership.group_id == group_id,
+            GroupMembership.subscriber_id == 2,
+        )
+    )
+    slots = db_session.scalars(select(MembershipSlot).where(MembershipSlot.group_id == group_id)).all()
+    installments = db_session.scalars(select(Installment).where(Installment.group_id == group_id)).all()
+
+    assert join_request is not None
+    assert join_request.status == "approved"
+    assert membership is not None
+    assert len(slots) == 3
+    assert len(installments) == 10
+
+
+def test_owner_can_reject_join_request(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "JOINREQ-REJ-001",
+            "title": "Join Reject Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "visibility": "public",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    request_response = client.post(
+        f"/api/groups/{group_id}/join-request",
+        headers=_subscriber_headers(client),
+        json={"slotCount": 2},
+    )
+    assert request_response.status_code == 201
+
+    reject_response = client.post(
+        f"/api/groups/{group_id}/reject-member",
+        headers=headers,
+        json={"joinRequestId": request_response.json()["id"]},
+    )
+
+    assert reject_response.status_code == 200
+    assert reject_response.json()["status"] == "rejected"
+    assert reject_response.json()["requestedSlotCount"] == 2
+
+    join_request = db_session.scalar(select(GroupJoinRequest).where(GroupJoinRequest.id == request_response.json()["id"]))
+    membership = db_session.scalar(
+        select(GroupMembership).where(
+            GroupMembership.group_id == group_id,
+            GroupMembership.subscriber_id == 2,
+        )
+    )
+    assert join_request is not None
+    assert join_request.status == "rejected"
+    assert membership is None
+
+
+def test_join_request_rejects_duplicate_pending_request(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "JOINREQ-002",
+            "title": "Duplicate Join Request Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "visibility": "public",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    first_response = client.post(
+        f"/api/groups/{group_id}/join-request",
+        headers=_subscriber_headers(client),
+        json={"slotCount": 1},
+    )
+    second_response = client.post(
+        f"/api/groups/{group_id}/join-request",
+        headers=_subscriber_headers(client),
+        json={"slotCount": 1},
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "Join request is already pending"
+
+
+def test_owner_can_search_private_group_invite_candidates(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "INV-SRCH-001",
+            "title": "Invite Search Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "visibility": "private",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    response = client.get(
+        f"/api/groups/{group_id}/search-users?q=8888",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["subscriberId"] == 2
+    assert response.json()[0]["fullName"] == "Subscriber One"
+    assert response.json()[0]["membershipStatus"] is None
+    assert response.json()[0]["inviteEligible"] is True
+
+
+def test_owner_can_create_group_invite_from_subscriber_search_result(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "INV-GRP-001",
+            "title": "Invite Api Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "visibility": "private",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    invite_response = client.post(
+        f"/api/groups/{group_id}/invite",
+        headers=headers,
+        json={"subscriberId": 2},
+    )
+
+    assert invite_response.status_code == 200
+    body = invite_response.json()
+    assert body["groupId"] == group_id
+    assert body["subscriberId"] == 2
+    assert body["subscriberName"] == "Subscriber One"
+    assert body["membershipStatus"] == "invited"
+    assert body["inviteStatus"] == "pending"
+    assert body["inviteExpiresAt"] is not None
+
+    membership = db_session.scalar(
+        select(GroupMembership).where(
+            GroupMembership.group_id == group_id,
+            GroupMembership.subscriber_id == 2,
+        )
+    )
+    assert membership is not None
+    assert membership.membership_status == "invited"
+    assert membership.can_bid is False
+
+
+def test_batch8_membership_flow_covers_join_invite_slot_restrictions_and_owner_controls(app, db_session):
+    client = TestClient(app)
+    owner_headers = _owner_headers(client)
+
+    subscriber_create_response = client.post(
+        "/api/subscribers",
+        headers=owner_headers,
+        json={
+            "ownerId": 1,
+            "fullName": "Subscriber Two",
+            "phone": "7777777777",
+            "email": "subscriber2@example.com",
+            "password": "subscriber-two-pass",
+        },
+    )
+    assert subscriber_create_response.status_code == 201
+
+    subscriber_two_login = client.post(
+        "/api/auth/login",
+        json={"phone": "7777777777", "password": "subscriber-two-pass"},
+    )
+    assert subscriber_two_login.status_code == 200
+    subscriber_two_headers = {"Authorization": f"Bearer {subscriber_two_login.json()['access_token']}"}
+
+    public_group_response = client.post(
+        "/api/groups",
+        headers=owner_headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "B8-JOIN-001",
+            "title": "Batch 8 Join Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 3,
+            "cycleCount": 3,
+            "cycleFrequency": "monthly",
+            "groupType": "MULTI_SLOT",
+            "visibility": "public",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    assert public_group_response.status_code == 201
+    public_group_id = public_group_response.json()["id"]
+
+    join_request_response = client.post(
+        f"/api/groups/{public_group_id}/join-request",
+        headers=_subscriber_headers(client),
+        json={"slotCount": 2},
+    )
+    assert join_request_response.status_code == 201
+    join_request_id = join_request_response.json()["id"]
+
+    join_requests_response = client.get(
+        f"/api/groups/{public_group_id}/join-requests",
+        headers=owner_headers,
+    )
+    assert join_requests_response.status_code == 200
+    assert [item["id"] for item in join_requests_response.json()] == [join_request_id]
+
+    approve_join_request_response = client.post(
+        f"/api/groups/{public_group_id}/approve-member",
+        headers=owner_headers,
+        json={"joinRequestId": join_request_id},
+    )
+    assert approve_join_request_response.status_code == 200
+    assert approve_join_request_response.json()["slotCount"] == 2
+
+    second_join_request_response = client.post(
+        f"/api/groups/{public_group_id}/join-request",
+        headers=subscriber_two_headers,
+        json={"slotCount": 2},
+    )
+    assert second_join_request_response.status_code == 201
+    assert second_join_request_response.json()["requestedSlotCount"] == 2
+
+    approve_over_capacity_response = client.post(
+        f"/api/groups/{public_group_id}/approve-member",
+        headers=owner_headers,
+        json={"joinRequestId": second_join_request_response.json()["id"]},
+    )
+    assert approve_over_capacity_response.status_code == 409
+    assert approve_over_capacity_response.json()["detail"] == "Group is full"
+
+    groups_response = client.get("/api/groups", headers=owner_headers)
+    assert groups_response.status_code == 200
+    public_group_summary = next(group for group in groups_response.json() if group["id"] == public_group_id)
+    assert public_group_summary["slotsRemaining"] == 1
+
+    private_group_response = client.post(
+        "/api/groups",
+        headers=owner_headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "B8-INV-001",
+            "title": "Batch 8 Invite Group",
+            "chitValue": 120000,
+            "installmentAmount": 10000,
+            "memberCount": 4,
+            "cycleCount": 4,
+            "cycleFrequency": "monthly",
+            "groupType": "MULTI_SLOT",
+            "visibility": "private",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    assert private_group_response.status_code == 201
+    private_group_id = private_group_response.json()["id"]
+
+    search_response = client.get(
+        f"/api/groups/{private_group_id}/search-users?q=7777",
+        headers=owner_headers,
+    )
+    assert search_response.status_code == 200
+    assert search_response.json()[0]["subscriberId"] == subscriber_create_response.json()["id"]
+    assert search_response.json()[0]["inviteEligible"] is True
+
+    invite_response = client.post(
+        f"/api/groups/{private_group_id}/invite",
+        headers=owner_headers,
+        json={"subscriberId": subscriber_create_response.json()["id"]},
+    )
+    assert invite_response.status_code == 200
+    invited_membership_id = invite_response.json()["membershipId"]
+
+    accept_invite_response = client.post(
+        f"/api/chits/{private_group_id}/accept-invite",
+        headers=subscriber_two_headers,
+        json={"membershipId": invited_membership_id},
+    )
+    assert accept_invite_response.status_code == 200
+    assert accept_invite_response.json()["membershipStatus"] == "active"
+    assert accept_invite_response.json()["slotCount"] == 1
+
+    remove_response = client.post(
+        f"/api/groups/{private_group_id}/memberships/{invited_membership_id}/remove",
+        headers=owner_headers,
+    )
+    assert remove_response.status_code == 200
+    assert remove_response.json()["membershipStatus"] == "removed"
+    assert remove_response.json()["slotsReleased"] == 1
+
+    db_session.expire_all()
+    invited_membership = db_session.scalar(select(GroupMembership).where(GroupMembership.id == invited_membership_id))
+    invited_slots = db_session.scalars(
+        select(MembershipSlot).where(MembershipSlot.group_id == private_group_id)
+    ).all()
+
+    assert invited_membership is not None
+    assert invited_membership.membership_status == "removed"
+    assert invited_slots == []
+
+
+def test_owner_can_remove_unprized_member_and_release_slots(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "REM-001",
+            "title": "Remove Member Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "groupType": "MULTI_SLOT",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    membership_response = client.post(
+        f"/api/groups/{group_id}/memberships",
+        headers=headers,
+        json={"subscriberId": 2, "memberNo": 1, "slotCount": 2},
+    )
+    membership_id = membership_response.json()["id"]
+
+    remove_response = client.post(
+        f"/api/groups/{group_id}/memberships/{membership_id}/remove",
+        headers=headers,
+    )
+
+    assert remove_response.status_code == 200
+    assert remove_response.json()["membershipStatus"] == "removed"
+    assert remove_response.json()["slotsReleased"] == 2
+
+    membership = db_session.scalar(select(GroupMembership).where(GroupMembership.id == membership_id))
+    slots = db_session.scalars(select(MembershipSlot).where(MembershipSlot.group_id == group_id)).all()
+    installments = db_session.scalars(select(Installment).where(Installment.membership_id == membership_id)).all()
+
+    assert membership is not None
+    assert membership.membership_status == "removed"
+    assert membership.member_no < 0
+    assert membership.can_bid is False
+    assert slots == []
+    assert installments == []
+
+
+def test_owner_cannot_remove_prized_member(app, db_session):
+    client = TestClient(app)
+    headers = _owner_headers(client)
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "REM-002",
+            "title": "Remove Blocked Group",
+            "chitValue": 100000,
+            "installmentAmount": 5000,
+            "memberCount": 10,
+            "cycleCount": 10,
+            "cycleFrequency": "monthly",
+            "groupType": "MULTI_SLOT",
+            "startDate": "2026-08-01",
+            "firstAuctionDate": "2026-08-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    membership_response = client.post(
+        f"/api/groups/{group_id}/memberships",
+        headers=headers,
+        json={"subscriberId": 2, "memberNo": 1, "slotCount": 2},
+    )
+    membership_id = membership_response.json()["id"]
+    first_slot = db_session.scalar(
+        select(MembershipSlot)
+        .where(MembershipSlot.membership_id == membership_id)
+        .order_by(MembershipSlot.slot_number.asc())
+    )
+    assert first_slot is not None
+    first_slot.has_won = True
+    membership = db_session.scalar(select(GroupMembership).where(GroupMembership.id == membership_id))
+    assert membership is not None
+    membership.prized_status = "prized"
+    db_session.commit()
+
+    remove_response = client.post(
+        f"/api/groups/{group_id}/memberships/{membership_id}/remove",
+        headers=headers,
+    )
+
+    assert remove_response.status_code == 409
+    assert remove_response.json()["detail"] == "Prized members cannot be removed"
 
 
 def test_close_collection_rejects_duplicate_close(app):

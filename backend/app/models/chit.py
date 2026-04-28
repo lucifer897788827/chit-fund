@@ -28,6 +28,10 @@ class ChitGroup(Base):
     member_count: Mapped[int] = mapped_column(Integer)
     cycle_count: Mapped[int] = mapped_column(Integer)
     cycle_frequency: Mapped[str] = mapped_column(String(30))
+    commission_type: Mapped[str] = mapped_column(String(30), default="NONE")
+    auction_type: Mapped[str] = mapped_column(String(30), default="LIVE")
+    group_type: Mapped[str] = mapped_column(String(30), default="STANDARD")
+    auto_cycle_calculation: Mapped[bool] = mapped_column(Boolean, default=False)
     visibility: Mapped[str] = mapped_column(String(20), default="private")
     start_date: Mapped[date] = mapped_column(Date)
     first_auction_date: Mapped[date] = mapped_column(Date)
@@ -65,14 +69,58 @@ class GroupMembership(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
+class GroupJoinRequest(Base):
+    __tablename__ = "group_join_requests"
+    __table_args__ = (
+        Index("ix_group_join_requests_group_status_created", "group_id", "status", "created_at"),
+        Index("ix_group_join_requests_subscriber_group_status", "subscriber_id", "group_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("chit_groups.id"), index=True)
+    subscriber_id: Mapped[int] = mapped_column(ForeignKey("subscribers.id"), index=True)
+    requested_slot_count: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    approved_membership_id: Mapped[int | None] = mapped_column(ForeignKey("group_memberships.id"), nullable=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class GroupInvite(Base):
+    __tablename__ = "group_invites"
+    __table_args__ = (
+        Index("ix_group_invites_group_status_issued", "group_id", "status", "issued_at"),
+        Index("ix_group_invites_group_subscriber_issued", "group_id", "subscriber_id", "issued_at"),
+        Index("ix_group_invites_membership_id", "membership_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("chit_groups.id"), index=True)
+    subscriber_id: Mapped[int] = mapped_column(ForeignKey("subscribers.id"), index=True)
+    membership_id: Mapped[int | None] = mapped_column(ForeignKey("group_memberships.id"), nullable=True)
+    invited_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    revoked_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
 class MembershipSlot(Base):
     __tablename__ = "membership_slots"
     __table_args__ = (
         UniqueConstraint("group_id", "slot_number"),
         Index("ix_membership_slots_group_user_has_won", "group_id", "user_id", "has_won"),
+        Index("ix_membership_slots_group_membership_has_won", "group_id", "membership_id", "has_won"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    membership_id: Mapped[int | None] = mapped_column(ForeignKey("group_memberships.id"), index=True, nullable=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("chit_groups.id"), index=True)
     slot_number: Mapped[int] = mapped_column(Integer)

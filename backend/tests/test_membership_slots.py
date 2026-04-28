@@ -134,12 +134,13 @@ def test_create_membership_endpoint_creates_slot_and_slot_counts(app, db_session
     slot = db_session.scalar(
         select(MembershipSlot).where(
             MembershipSlot.group_id == group_id,
-            MembershipSlot.user_id == 1,
+            MembershipSlot.membership_id == membership_response.json()["id"],
             MembershipSlot.slot_number == 1,
         )
     )
 
     assert slot is not None
+    assert slot.membership_id == membership_response.json()["id"]
     assert slot.has_won is False
     assert get_user_slot_count(db_session, group_id=group_id, user_id=1) == 1
     assert get_user_available_slot_count(db_session, group_id=group_id, user_id=1) == 1
@@ -232,6 +233,49 @@ def test_duplicate_membership_request_adds_slot_to_existing_membership(app, db_s
     assert first_response.json()["id"] == second_response.json()["id"]
     assert second_response.json()["slotCount"] == 2
     assert get_user_slot_count(db_session, group_id=group_id, user_id=1) == 2
+
+
+def test_list_groups_reports_slots_remaining(app, db_session):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    login_response = client.post(
+        "/api/auth/login",
+        json={"phone": "9999999999", "password": "secret123"},
+    )
+    headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+    group_response = client.post(
+        "/api/groups",
+        headers=headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "SLOT-API-004",
+            "title": "Slot Remaining Group",
+            "chitValue": 300000,
+            "installmentAmount": 15000,
+            "memberCount": 5,
+            "cycleCount": 5,
+            "cycleFrequency": "monthly",
+            "startDate": "2026-06-01",
+            "firstAuctionDate": "2026-06-10",
+        },
+    )
+    group_id = group_response.json()["id"]
+
+    membership_response = client.post(
+        f"/api/groups/{group_id}/memberships",
+        headers=headers,
+        json={"subscriberId": 1, "memberNo": 1, "slotCount": 2},
+    )
+
+    assert membership_response.status_code == 201
+
+    list_response = client.get("/api/groups", headers=headers)
+
+    assert list_response.status_code == 200
+    group = next(item for item in list_response.json() if item["id"] == group_id)
+    assert group["slotsRemaining"] == 3
 
 
 def test_legacy_membership_without_slots_uses_backward_compatible_bid_eligibility(app, db_session):

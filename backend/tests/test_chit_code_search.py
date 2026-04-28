@@ -8,6 +8,13 @@ from app.models.chit import ChitGroup, GroupMembership
 from app.models.user import Owner, Subscriber, User
 
 
+def _assert_legacy_chit_headers(response) -> None:
+    assert response.headers["Deprecation"] == "true"
+    assert response.headers["Sunset"]
+    assert "/api/groups" in response.headers["Link"]
+    assert "299" in response.headers["Warning"]
+
+
 def _owner_headers(client: TestClient, *, phone: str = "9999999999", password: str = "secret123") -> dict[str, str]:
     response = client.post(
         "/api/auth/login",
@@ -144,6 +151,7 @@ def test_code_search_returns_active_matches_across_owners_and_visibilities(app, 
     response = client.get("/api/chits/code/JOIN-123")
 
     assert response.status_code == 200
+    _assert_legacy_chit_headers(response)
     payload = response.json()
     assert [item["title"] for item in payload] == ["Owner Two Public Match"]
     assert all(item["status"] == "active" for item in payload)
@@ -166,10 +174,13 @@ def test_outsider_cannot_search_private_chit_by_code(app, db_session):
     subscriber_response = client.get("/api/chits/code/join-404", headers=_subscriber_headers(client))
 
     assert anonymous_response.status_code == 404
+    _assert_legacy_chit_headers(anonymous_response)
     assert subscriber_response.status_code == 404
+    _assert_legacy_chit_headers(subscriber_response)
 
     owner_response = client.get("/api/chits/code/join-404", headers=_owner_headers(client))
     assert owner_response.status_code == 200
+    _assert_legacy_chit_headers(owner_response)
     assert owner_response.json()[0]["id"] == group.id
 
 
@@ -190,6 +201,7 @@ def test_subscriber_can_search_public_code_request_membership_and_owner_can_appr
 
     search_response = client.get("/api/chits/code/join-777", headers=subscriber_headers)
     assert search_response.status_code == 200
+    _assert_legacy_chit_headers(search_response)
     assert search_response.json()[0]["id"] == group.id
 
     request_response = client.post(
@@ -197,6 +209,7 @@ def test_subscriber_can_search_public_code_request_membership_and_owner_can_appr
         headers=subscriber_headers,
     )
     assert request_response.status_code == 200
+    _assert_legacy_chit_headers(request_response)
     membership_id = request_response.json()["membershipId"]
     assert request_response.json()["membershipStatus"] == "pending"
 
@@ -206,6 +219,7 @@ def test_subscriber_can_search_public_code_request_membership_and_owner_can_appr
         json={"membershipId": membership_id},
     )
     assert approve_response.status_code == 200
+    _assert_legacy_chit_headers(approve_response)
     assert approve_response.json()["membershipStatus"] == "active"
 
     membership = db_session.scalar(select(GroupMembership).where(GroupMembership.id == membership_id))
@@ -239,4 +253,5 @@ def test_invited_subscriber_can_search_private_chit_by_code(app, db_session):
     response = client.get("/api/chits/code/join-inv", headers=_subscriber_headers(client))
 
     assert response.status_code == 200
+    _assert_legacy_chit_headers(response)
     assert response.json()[0]["id"] == group.id

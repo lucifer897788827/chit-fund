@@ -15,8 +15,12 @@ class GroupCreate(BaseModel):
     chitValue: int
     installmentAmount: int
     memberCount: int
-    cycleCount: int
+    cycleCount: int | None = None
+    autoCycleCalculation: bool = False
     cycleFrequency: str
+    commissionType: str = "NONE"
+    auctionType: str = "LIVE"
+    groupType: str = "STANDARD"
     startDate: date
     firstAuctionDate: date
     penaltyEnabled: bool = False
@@ -70,11 +74,18 @@ def _parse_percentage_value(value: Any) -> float | int | None:
 
 class GroupResponse(GroupCreate):
     id: int
+    cycleCount: int
+    slotsRemaining: int
     currentCycleNo: int
     biddingEnabled: bool
     collectionClosed: bool = False
     currentMonthStatus: CurrentMonthStatus = CurrentMonthStatus.OPEN
     status: str
+
+
+class GroupSettingsUpdate(BaseModel):
+    commissionType: str
+    auctionType: str
 
 
 class GroupStatusResponse(BaseModel):
@@ -89,6 +100,15 @@ class GroupMemberSummaryResponse(BaseModel):
     subscriberId: int
     memberNo: int
     memberName: str | None = None
+    membershipStatus: str = "active"
+    prizedStatus: str = "unprized"
+    lastPaymentDate: date | None = None
+    canBid: bool = True
+    slotCount: int = 1
+    wonSlotCount: int = 0
+    remainingSlotCount: int = 1
+    removeEligible: bool = False
+    removeBlockedReason: str | None = None
     paid: int
     received: int
     dividend: int
@@ -110,6 +130,84 @@ class MembershipResponse(MembershipCreate):
     slotCount: int = 1
     wonSlotCount: int = 0
     remainingSlotCount: int = 1
+
+
+class JoinRequestCreate(BaseModel):
+    slotCount: int = 1
+
+
+class JoinRequestResponse(BaseModel):
+    id: int
+    groupId: int
+    subscriberId: int
+    subscriberName: str | None = None
+    requestedSlotCount: int
+    paymentScore: int | None = None
+    status: str
+    createdAt: datetime
+    reviewedAt: datetime | None = None
+    approvedMembershipId: int | None = None
+
+
+class JoinRequestApprovalRequest(BaseModel):
+    joinRequestId: int
+
+
+class GroupInviteCandidateResponse(BaseModel):
+    subscriberId: int
+    userId: int
+    fullName: str
+    phone: str
+    subscriberStatus: str
+    membershipStatus: str | None = None
+    inviteStatus: str | None = None
+    inviteExpiresAt: datetime | None = None
+    memberNo: int | None = None
+    inviteEligible: bool
+    note: str | None = None
+
+
+class GroupInviteCreate(BaseModel):
+    subscriberId: int
+
+
+class GroupInviteResponse(BaseModel):
+    inviteId: int
+    membershipId: int
+    groupId: int
+    subscriberId: int
+    subscriberName: str | None = None
+    memberNo: int | None = None
+    membershipStatus: str | None = None
+    inviteStatus: str | None = None
+    inviteExpiresAt: datetime | None = None
+    requestedAt: datetime
+
+
+class GroupInviteAuditResponse(BaseModel):
+    inviteId: int
+    groupId: int
+    subscriberId: int
+    subscriberName: str | None = None
+    membershipId: int | None = None
+    memberNo: int | None = None
+    membershipStatus: str | None = None
+    status: str
+    issuedAt: datetime
+    expiresAt: datetime | None = None
+    acceptedAt: datetime | None = None
+    revokedAt: datetime | None = None
+    invitedByUserId: int
+    revokedByUserId: int | None = None
+
+
+class GroupMemberRemovalResponse(BaseModel):
+    membershipId: int
+    groupId: int
+    subscriberId: int
+    membershipStatus: str
+    slotsReleased: int
+    removedAt: datetime
 
 
 class AuctionSessionCreate(BaseModel):

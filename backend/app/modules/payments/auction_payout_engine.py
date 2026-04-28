@@ -42,6 +42,7 @@ def _build_membership_slot_count_map(
     if not memberships:
         return {}
 
+    membership_ids = [membership.id for membership in memberships]
     subscriber_ids = sorted({membership.subscriber_id for membership in memberships})
     subscriber_user_ids = {
         int(subscriber_id): int(user_id)
@@ -50,28 +51,34 @@ def _build_membership_slot_count_map(
         ).all()
     }
     user_ids = sorted({user_id for user_id in subscriber_user_ids.values()})
-    if not user_ids:
+    if not membership_ids:
         return {membership.id: 1 for membership in memberships}
 
-    slot_counts_by_user_id = {
-        int(user_id): int(slot_count)
-        for user_id, slot_count in db.execute(
+    slot_counts_by_key = {
+        (int(membership_id) if membership_id is not None else None, int(user_id) if user_id is not None else None): int(slot_count)
+        for membership_id, user_id, slot_count in db.execute(
             select(
+                MembershipSlot.membership_id,
                 MembershipSlot.user_id,
                 func.count(MembershipSlot.id),
             )
             .where(
                 MembershipSlot.group_id == memberships[0].group_id,
-                MembershipSlot.user_id.in_(user_ids),
+                (MembershipSlot.membership_id.in_(membership_ids))
+                | ((MembershipSlot.membership_id.is_(None)) & (MembershipSlot.user_id.in_(user_ids))),
             )
-            .group_by(MembershipSlot.user_id)
+            .group_by(MembershipSlot.membership_id, MembershipSlot.user_id)
         ).all()
     }
 
     membership_slot_counts: dict[int, int] = {}
     for membership in memberships:
         user_id = subscriber_user_ids.get(int(membership.subscriber_id))
-        membership_slot_counts[membership.id] = max(int(slot_counts_by_user_id.get(user_id, 0)), 1)
+        membership_slot_counts[membership.id] = max(
+            int(slot_counts_by_key.get((membership.id, user_id), 0))
+            + int(slot_counts_by_key.get((None, user_id), 0)),
+            1,
+        )
     return membership_slot_counts
 
 

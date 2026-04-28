@@ -6,6 +6,7 @@ from app.models.chit import ChitGroup
 from app.models.chit import GroupMembership
 from app.models.user import Subscriber
 from app.core.security import CurrentUser, require_owner, require_subscriber
+from app.modules.groups.invite_service import mark_group_invite_accepted, mark_group_invite_rejected, resolve_invite_status
 from app.modules.groups.service import serialize_group
 from app.modules.groups.service import (
     _create_membership_installments,
@@ -311,6 +312,9 @@ def _resolve_invited_membership_for_subscriber(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Membership invite not found")
     if membership.membership_status != "invited":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Membership invite is not pending")
+    invite_status, _invite_expires_at = resolve_invite_status(membership)
+    if invite_status == "expired":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Membership invite has expired")
     return group, membership
 
 
@@ -321,17 +325,19 @@ def accept_membership_invite(db: Session, group_id: int, membership_id: int, cur
         membership_id=membership_id,
         current_user=current_user,
     )
+    mark_group_invite_accepted(db, group=group, membership=membership, current_user=current_user)
     return _activate_membership(db, group=group, membership=membership)
 
 
 def reject_membership_invite(db: Session, group_id: int, membership_id: int, current_user: CurrentUser) -> dict:
-    _group, membership = _resolve_invited_membership_for_subscriber(
+    group, membership = _resolve_invited_membership_for_subscriber(
         db,
         group_id=group_id,
         membership_id=membership_id,
         current_user=current_user,
     )
     payload = _reject_membership_record(membership)
+    mark_group_invite_rejected(db, group=group, membership=membership)
     db.commit()
     return payload
 

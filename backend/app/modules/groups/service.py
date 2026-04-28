@@ -3,7 +3,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.audit import log_audit_event
@@ -15,10 +15,13 @@ from app.models.auction import AuctionResult, AuctionSession
 from app.models.chit import ChitGroup, CurrentMonthStatus, GroupMembership, Installment, MembershipSlot
 from app.models.money import Payment, Payout
 from app.models.user import Subscriber
+from app.modules.auctions.commission_service import normalize_commission_mode
 from app.modules.auctions.service import validate_session_bid_controls
 from app.modules.auctions.commission_service import validate_commission_config
 from app.modules.groups.membership_validation import validate_membership_creation
 from app.modules.groups.slot_service import (
+    attach_group_capacity_summaries,
+    build_membership_slot_summary,
     create_membership_slots,
     ensure_membership_slot,
     get_membership_bid_eligibility,
@@ -114,7 +117,38 @@ def _normalize_group_visibility(value: str | None) -> str:
     return normalized
 
 
+def _normalize_group_type(value: str | None) -> str:
+    normalized = (value or "STANDARD").strip().upper()
+    if normalized not in {"STANDARD", "MULTI_SLOT"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Group type must be STANDARD or MULTI_SLOT",
+        )
+    return normalized
+
+
+def _resolve_cycle_count(*, member_count: int, cycle_count: int | None, auto_cycle_calculation: bool) -> int:
+    if auto_cycle_calculation:
+        return int(member_count)
+    if cycle_count is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Cycle count is required when auto cycle calculation is disabled",
+        )
+    normalized_cycle_count = int(cycle_count)
+    if normalized_cycle_count < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Cycle count must be at least 1",
+        )
+    return normalized_cycle_count
+
+
 def serialize_group(group: ChitGroup) -> dict:
+    slots_remaining = max(
+        int(getattr(group, "_remaining_slot_count", int(group.member_count or 0)) or 0),
+        0,
+    )
     return {
         "id": group.id,
         "ownerId": group.owner_id,
@@ -124,7 +158,12 @@ def serialize_group(group: ChitGroup) -> dict:
         "installmentAmount": money_int(group.installment_amount),
         "memberCount": group.member_count,
         "cycleCount": group.cycle_count,
+        "slotsRemaining": slots_remaining,
+        "autoCycleCalculation": bool(group.auto_cycle_calculation),
         "cycleFrequency": group.cycle_frequency,
+        "commissionType": group.commission_type or "NONE",
+        "auctionType": group.auction_type or "LIVE",
+        "groupType": group.group_type or "STANDARD",
         "visibility": group.visibility,
         "startDate": group.start_date,
         "firstAuctionDate": group.first_auction_date,
@@ -138,8 +177,6 @@ def serialize_group(group: ChitGroup) -> dict:
         "currentMonthStatus": group.current_month_status or CurrentMonthStatus.OPEN.value,
         "status": group.status,
     }
-
-
 def create_group(db: Session, payload, current_user: CurrentUser):
     owner = require_owner(current_user)
     if payload.ownerId is not None and payload.ownerId != owner.id:
@@ -151,6 +188,15 @@ def create_group(db: Session, payload, current_user: CurrentUser):
         grace_period_days=getattr(payload, "gracePeriodDays", 0),
     )
     visibility = _normalize_group_visibility(getattr(payload, "visibility", "private"))
+    auto_cycle_calculation = bool(getattr(payload, "autoCycleCalculation", False))
+    cycle_count = _resolve_cycle_count(
+        member_count=int(payload.memberCount),
+        cycle_count=getattr(payload, "cycleCount", None),
+        auto_cycle_calculation=auto_cycle_calculation,
+    )
+    commission_type = normalize_commission_mode(getattr(payload, "commissionType", None))
+    auction_type = _normalize_auction_mode(getattr(payload, "auctionType", None))
+    group_type = _normalize_group_type(getattr(payload, "groupType", None))
 
     group = ChitGroup(
         owner_id=owner.id,
@@ -159,8 +205,12 @@ def create_group(db: Session, payload, current_user: CurrentUser):
         chit_value=payload.chitValue,
         installment_amount=payload.installmentAmount,
         member_count=payload.memberCount,
-        cycle_count=payload.cycleCount,
+        cycle_count=cycle_count,
         cycle_frequency=payload.cycleFrequency,
+        commission_type=commission_type,
+        auction_type=auction_type,
+        group_type=group_type,
+        auto_cycle_calculation=auto_cycle_calculation,
         visibility=visibility,
         start_date=payload.startDate,
         first_auction_date=payload.firstAuctionDate,
@@ -194,12 +244,60 @@ def create_group(db: Session, payload, current_user: CurrentUser):
             "installmentAmount": money_int(group.installment_amount),
             "memberCount": group.member_count,
             "cycleCount": group.cycle_count,
+            "autoCycleCalculation": bool(group.auto_cycle_calculation),
+            "commissionType": group.commission_type,
+            "auctionType": group.auction_type,
+            "groupType": group.group_type,
             "visibility": group.visibility,
             "status": group.status,
             "penaltyEnabled": group.penalty_enabled,
             "penaltyType": group.penalty_type,
             "penaltyValue": serialize_penalty_value(group.penalty_type, group.penalty_value),
             "gracePeriodDays": group.grace_period_days,
+        },
+    )
+    db.commit()
+    db.refresh(group)
+    return serialize_group(group)
+
+
+def update_group_settings(db: Session, group_id: int, payload, current_user: CurrentUser) -> dict:
+    owner = require_owner(current_user)
+    group = db.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    if group is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    if group.owner_id != owner.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another owner's group")
+    settings_locked = (
+        bool(group.collection_closed)
+        or int(group.current_cycle_no or 1) > 1
+        or (group.current_month_status or CurrentMonthStatus.OPEN.value) != CurrentMonthStatus.OPEN.value
+        or db.scalar(select(AuctionSession.id).where(AuctionSession.group_id == group.id).limit(1)) is not None
+    )
+    if settings_locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Group settings are locked after the group has started",
+        )
+
+    group.commission_type = normalize_commission_mode(getattr(payload, "commissionType", None))
+    group.auction_type = _normalize_auction_mode(getattr(payload, "auctionType", None))
+    group.updated_at = utcnow()
+    log_audit_event(
+        db,
+        action="group.settings.updated",
+        entity_type="chit_group",
+        entity_id=group.id,
+        current_user=current_user,
+        metadata={
+            "groupId": group.id,
+            "commissionType": group.commission_type,
+            "auctionType": group.auction_type,
+        },
+        after={
+            "groupId": group.id,
+            "commissionType": group.commission_type,
+            "auctionType": group.auction_type,
         },
     )
     db.commit()
@@ -222,6 +320,7 @@ def list_groups(
     else:
         total_count = count_statement(db, statement)
         groups = db.scalars(apply_pagination(statement, pagination)).all()
+    attach_group_capacity_summaries(db, groups)
 
     return [serialize_group(group) for group in groups] if pagination is None else build_paginated_response(
         [serialize_group(group) for group in groups],
@@ -345,25 +444,39 @@ def get_group_member_summary(db: Session, group_id: int, current_user: CurrentUs
         paid = db.scalar(
             select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.membership_id == membership.id)
         ) or 0
+        last_payment_date = db.scalar(
+            select(func.max(Payment.payment_date)).where(Payment.membership_id == membership.id)
+        )
         received = db.scalar(
             select(func.coalesce(func.sum(Payout.net_amount), 0)).where(Payout.membership_id == membership.id)
         ) or 0
-        subscriber_user_id = subscriber.user_id if subscriber is not None else -1
-        slot_count = db.scalar(
-            select(func.count(MembershipSlot.id)).where(
-                MembershipSlot.group_id == group.id,
-                MembershipSlot.user_id == subscriber_user_id,
-            )
-        ) or 0
+        slot_summary = build_membership_slot_summary(db, membership)
+        slot_count = slot_summary.total_slots
         dividend = money_int(group_dividend) * max(int(slot_count), 1)
         paid_value = money_int(paid)
         received_value = money_int(received)
+        remove_blocked_reason = _get_membership_removal_blocked_reason(
+            db,
+            membership=membership,
+            paid_amount=paid_value,
+            received_amount=received_value,
+            slot_summary=slot_summary,
+        )
         rows.append(
             {
                 "membershipId": membership.id,
                 "subscriberId": membership.subscriber_id,
                 "memberNo": membership.member_no,
                 "memberName": subscriber.full_name if subscriber is not None else None,
+                "membershipStatus": membership.membership_status,
+                "prizedStatus": membership.prized_status,
+                "lastPaymentDate": last_payment_date,
+                "canBid": membership.can_bid,
+                "slotCount": slot_summary.total_slots,
+                "wonSlotCount": slot_summary.won_slots,
+                "remainingSlotCount": slot_summary.available_slots,
+                "removeEligible": remove_blocked_reason is None,
+                "removeBlockedReason": remove_blocked_reason,
                 "paid": paid_value,
                 "received": received_value,
                 "dividend": dividend,
@@ -371,6 +484,126 @@ def get_group_member_summary(db: Session, group_id: int, current_user: CurrentUs
             }
         )
     return rows
+
+
+def _get_membership_removal_blocked_reason(
+    db: Session,
+    *,
+    membership: GroupMembership,
+    paid_amount: int | None = None,
+    received_amount: int | None = None,
+    slot_summary=None,
+) -> str | None:
+    if membership.membership_status != "active":
+        return "Only active members can be removed"
+
+    effective_slot_summary = slot_summary or build_membership_slot_summary(db, membership)
+    effective_paid_amount = int(paid_amount or 0)
+    effective_received_amount = int(received_amount or 0)
+
+    if effective_slot_summary.won_slots > 0 or membership.prized_status == "prized":
+        return "Prized members cannot be removed"
+    if effective_paid_amount > 0:
+        return "Members with recorded payments cannot be removed"
+    if effective_received_amount > 0:
+        return "Members with recorded payouts cannot be removed"
+
+    installment_history_count = db.scalar(
+        select(func.count(Installment.id)).where(
+            Installment.membership_id == membership.id,
+            or_(
+                Installment.paid_amount > 0,
+                Installment.status.in_(("paid", "partial")),
+            ),
+        )
+    ) or 0
+    if int(installment_history_count) > 0:
+        return "Members with paid installments cannot be removed"
+    return None
+
+
+def remove_group_member(db: Session, group_id: int, membership_id: int, current_user: CurrentUser) -> dict:
+    owner = require_owner(current_user)
+    group = db.scalar(select(ChitGroup).where(ChitGroup.id == group_id))
+    if group is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    if group.owner_id != owner.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another owner's group")
+
+    membership = db.scalar(
+        select(GroupMembership).where(
+            GroupMembership.id == membership_id,
+            GroupMembership.group_id == group.id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Membership not found")
+
+    slot_summary = build_membership_slot_summary(db, membership)
+    paid_amount = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.membership_id == membership.id)
+    ) or 0
+    received_amount = db.scalar(
+        select(func.coalesce(func.sum(Payout.net_amount), 0)).where(Payout.membership_id == membership.id)
+    ) or 0
+    remove_blocked_reason = _get_membership_removal_blocked_reason(
+        db,
+        membership=membership,
+        paid_amount=money_int(paid_amount),
+        received_amount=money_int(received_amount),
+        slot_summary=slot_summary,
+    )
+    if remove_blocked_reason is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=remove_blocked_reason)
+
+    slots = db.scalars(
+        select(MembershipSlot).where(MembershipSlot.membership_id == membership.id)
+    ).all()
+    slots_released = len(slots)
+    for slot in slots:
+        db.delete(slot)
+
+    installments = db.scalars(
+        select(Installment).where(Installment.membership_id == membership.id)
+    ).all()
+    for installment in installments:
+        db.delete(installment)
+
+    membership.membership_status = "removed"
+    membership.can_bid = False
+    membership.member_no = -membership.id
+    membership.updated_at = utcnow()
+
+    removed_at = utcnow()
+    log_audit_event(
+        db,
+        action="group.membership.removed",
+        entity_type="group_membership",
+        entity_id=membership.id,
+        current_user=current_user,
+        metadata={
+            "groupId": group.id,
+            "subscriberId": membership.subscriber_id,
+            "slotsReleased": slots_released,
+        },
+        after={
+            "membershipId": membership.id,
+            "groupId": group.id,
+            "subscriberId": membership.subscriber_id,
+            "membershipStatus": membership.membership_status,
+            "slotsReleased": slots_released,
+            "removedAt": removed_at,
+        },
+    )
+    db.commit()
+    return {
+        "membershipId": membership.id,
+        "groupId": group.id,
+        "subscriberId": membership.subscriber_id,
+        "membershipStatus": membership.membership_status,
+        "slotsReleased": slots_released,
+        "removedAt": removed_at,
+    }
 
 
 def _add_months(base_date: date, months_to_add: int) -> date:
@@ -638,9 +871,9 @@ def create_auction_session(db: Session, group_id: int, payload, current_user: Cu
         datetime.min.time(),
         tzinfo=timezone.utc,
     )
-    auction_mode = _normalize_auction_mode(getattr(payload, "auctionMode", None))
+    auction_mode = _normalize_auction_mode(getattr(payload, "auctionMode", None) or group.auction_type)
     commission_mode, commission_value = validate_commission_config(
-        mode=getattr(payload, "commissionMode", None),
+        mode=getattr(payload, "commissionMode", None) or group.commission_type,
         value=getattr(payload, "commissionValue", None),
         group=group,
     )

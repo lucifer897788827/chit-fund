@@ -44,6 +44,7 @@ import {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  window.confirm = jest.fn(() => true);
 });
 
 function normalizedText(element) {

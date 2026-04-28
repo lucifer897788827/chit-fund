@@ -62,10 +62,16 @@ def test_batch7_full_system_flow_covers_auth_group_membership_auction_payment_an
     assert membership_response.status_code == 201
     membership_id = membership_response.json()["id"]
 
+    close_collection_response = client.post(
+        f"/api/groups/{group_id}/close-collection",
+        headers=owner_headers,
+    )
+    assert close_collection_response.status_code == 200
+
     auction_response = client.post(
         f"/api/groups/{group_id}/auction-sessions",
         headers=owner_headers,
-        json={"cycleNo": 1, "biddingWindowSeconds": 180},
+        json={"cycleNo": 1, "biddingWindowSeconds": 180, "allowWithPending": True},
     )
     assert auction_response.status_code == 201
     session_id = auction_response.json()["id"]
@@ -134,16 +140,89 @@ def test_batch7_full_system_flow_covers_auth_group_membership_auction_payment_an
     assert subscriber_titles == owner_titles
 
     jobs = db_session.scalars(
-        select(JobRun).where(JobRun.task_name == "notifications.deliver_notification")
+        select(JobRun).where(JobRun.task_name == "auctions.expand_payout_derivatives")
     ).all()
-    assert len(jobs) == 6
-    assert {row.task_name for row in jobs} == {"notifications.deliver_notification"}
+    assert len(jobs) == 1
+    assert {row.task_name for row in jobs} == {"auctions.expand_payout_derivatives"}
     assert {row.status for row in jobs} == {"success"}
-    assert all(row.summary_json and "notification_id" in row.summary_json for row in jobs)
+    assert all(row.summary_json for row in jobs)
 
-    support_jobs_response = client.get(
-        "/api/support/jobs?taskName=notifications.deliver_notification&status=success",
+
+def test_batch7_manual_lifecycle_flow_covers_create_join_approve_and_auction(app, db_session):
+    client = TestClient(app)
+    owner_headers = _login_headers(client, "9999999999", "secret123")
+    subscriber_headers = _login_headers(client, "8888888888", "pass123")
+
+    group_response = client.post(
+        "/api/groups",
+        headers=owner_headers,
+        json={
+            "ownerId": 1,
+            "groupCode": "B7-MANUAL-001",
+            "title": "Batch 7 Manual Lifecycle Group",
+            "chitValue": 150000,
+            "installmentAmount": 5000,
+            "memberCount": 3,
+            "cycleCount": 3,
+            "cycleFrequency": "monthly",
+            "visibility": "public",
+            "startDate": "2026-07-01",
+            "firstAuctionDate": "2026-07-10",
+        },
+    )
+    assert group_response.status_code == 201
+    group_id = group_response.json()["id"]
+
+    join_request_response = client.post(
+        f"/api/groups/{group_id}/join-request",
+        headers=subscriber_headers,
+        json={"slotCount": 1},
+    )
+    assert join_request_response.status_code == 201
+
+    approve_response = client.post(
+        f"/api/groups/{group_id}/approve-member",
+        headers=owner_headers,
+        json={"joinRequestId": join_request_response.json()["id"]},
+    )
+    assert approve_response.status_code == 200
+    membership_id = approve_response.json()["id"]
+    assert approve_response.json()["membershipStatus"] == "active"
+
+    close_collection_response = client.post(
+        f"/api/groups/{group_id}/close-collection",
         headers=owner_headers,
     )
-    assert support_jobs_response.status_code == 200
-    assert len(support_jobs_response.json()) == 6
+    assert close_collection_response.status_code == 200
+
+    auction_response = client.post(
+        f"/api/groups/{group_id}/auction-sessions",
+        headers=owner_headers,
+        json={"cycleNo": 1, "biddingWindowSeconds": 180, "allowWithPending": True},
+    )
+    assert auction_response.status_code == 201
+    session_id = auction_response.json()["id"]
+
+    bid_response = client.post(
+        f"/api/auctions/{session_id}/bids",
+        headers=subscriber_headers,
+        json={"membershipId": membership_id, "bidAmount": 9000, "idempotencyKey": "b7-manual-bid-001"},
+    )
+    assert bid_response.status_code == 200
+    assert bid_response.json()["accepted"] is True
+
+    finalize_response = client.post(f"/api/auctions/{session_id}/finalize", headers=owner_headers)
+    assert finalize_response.status_code == 200
+    assert finalize_response.json()["status"] == "finalized"
+
+    db_session.expire_all()
+    membership = db_session.scalar(select(GroupMembership).where(GroupMembership.id == membership_id))
+    session = db_session.scalar(select(AuctionSession).where(AuctionSession.id == session_id))
+    payout = _wait_for_payout(db_session)
+
+    assert membership is not None
+    assert membership.prized_status == "prized"
+    assert session is not None
+    assert session.status == "finalized"
+    assert payout is not None
+    assert payout.membership_id == membership_id

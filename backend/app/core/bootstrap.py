@@ -141,12 +141,14 @@ def bootstrap_database() -> None:
         db.add_all(
             [
                 MembershipSlot(
+                    membership_id=memberships[0].id,
                     user_id=owner_user.id,
                     group_id=group.id,
                     slot_number=memberships[0].member_no,
                     has_won=False,
                 ),
                 MembershipSlot(
+                    membership_id=memberships[1].id,
                     user_id=subscriber_user.id,
                     group_id=group.id,
                     slot_number=memberships[1].member_no,

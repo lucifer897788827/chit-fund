@@ -10,6 +10,7 @@ from app.models.chit import ChitGroup, GroupMembership, membership_can_bid
 from app.models.user import Subscriber, User
 from app.modules.auctions.service import get_auction_state
 from app.modules.admin.cache import invalidate_admin_users_cache
+from app.modules.groups.invite_service import resolve_invite_status
 from app.modules.groups.slot_service import sync_membership_slot_state
 from app.modules.payments.installment_service import build_membership_dues_snapshot_map
 from app.modules.subscribers.auth_service import create_subscriber_user
@@ -167,6 +168,7 @@ def get_subscriber_dashboard(db: Session, current_user: CurrentUser) -> dict:
     dues_snapshot_map = build_membership_dues_snapshot_map(db, membership_ids)
 
     for membership, group in membership_rows:
+        invite_status, invite_expires_at = resolve_invite_status(membership)
         latest_session = latest_session_by_group_id.get(group.id)
         auction_status = None
         if latest_session is not None:
@@ -181,6 +183,8 @@ def get_subscriber_dashboard(db: Session, current_user: CurrentUser) -> dict:
             "groupTitle": group.title,
             "memberNo": membership.member_no,
             "membershipStatus": membership.membership_status,
+            "inviteStatus": invite_status,
+            "inviteExpiresAt": invite_expires_at,
             "prizedStatus": membership.prized_status,
             "canBid": membership_can_bid(membership),
             "currentCycleNo": group.current_cycle_no,

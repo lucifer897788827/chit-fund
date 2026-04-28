@@ -99,6 +99,17 @@ function getSlotSummary(source = {}) {
   };
 }
 
+function getInviteState(invite) {
+  const inviteStatus = String(invite?.inviteStatus ?? "").toLowerCase();
+  if (inviteStatus === "expired") {
+    return "expired";
+  }
+  if (inviteStatus === "accepted") {
+    return "accepted";
+  }
+  return "pending";
+}
+
 function normalizeSubscriberDashboard(data = {}) {
   return {
     memberships: Array.isArray(data?.memberships) ? data.memberships : [],
@@ -516,11 +527,19 @@ export default function SubscriberDashboard() {
                       {invite.groupCode} · Member #{invite.memberNo}
                     </p>
                     <p>Installment {formatMoney(invite.installmentAmount)}</p>
-                    <p>Accept this invite to activate the membership and start dues tracking.</p>
+                    <p>
+                      Invite status: {titleCase(getInviteState(invite))}
+                      {invite.inviteExpiresAt ? ` · Expires ${formatOutcomeDate(invite.inviteExpiresAt) ?? invite.inviteExpiresAt}` : ""}
+                    </p>
+                    <p>
+                      {getInviteState(invite) === "expired"
+                        ? "This invite has expired. Ask the organizer to send a fresh invite."
+                        : "Accept this invite to activate the membership and start dues tracking."}
+                    </p>
                     <div className="flex flex-wrap gap-3">
                       <button
                         className="action-button"
-                        disabled={actingInviteId === invite.membershipId}
+                        disabled={actingInviteId === invite.membershipId || getInviteState(invite) === "expired"}
                         onClick={() => handleInviteAction(invite, "accept")}
                         type="button"
                       >
@@ -528,7 +547,7 @@ export default function SubscriberDashboard() {
                       </button>
                       <button
                         className="action-button"
-                        disabled={actingInviteId === invite.membershipId}
+                        disabled={actingInviteId === invite.membershipId || getInviteState(invite) === "expired"}
                         onClick={() => handleInviteAction(invite, "reject")}
                         type="button"
                       >

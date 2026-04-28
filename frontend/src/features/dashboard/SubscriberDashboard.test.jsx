@@ -80,6 +80,10 @@ function hasText(expected) {
   return (_content, element) => normalizedText(element) === expected;
 }
 
+function hasTextFragment(expected) {
+  return (_content, element) => normalizedText(element)?.includes(expected);
+}
+
 test("renders a subscriber-first overview with membership balances, active auctions, and recent outcomes when available", async () => {
   getCurrentUser.mockReturnValue({
     role: "subscriber",
@@ -376,6 +380,8 @@ test("lets a subscriber accept and reject private-group invites", async () => {
           groupTitle: "Private Growth Chit",
           memberNo: 5,
           membershipStatus: "invited",
+          inviteStatus: "pending",
+          inviteExpiresAt: "2026-05-05T10:00:00Z",
           prizedStatus: "unprized",
           canBid: false,
           currentCycleNo: 1,
@@ -399,6 +405,8 @@ test("lets a subscriber accept and reject private-group invites", async () => {
           groupTitle: "Private Savings Chit",
           memberNo: 6,
           membershipStatus: "invited",
+          inviteStatus: "pending",
+          inviteExpiresAt: "2026-05-06T10:00:00Z",
           prizedStatus: "unprized",
           canBid: false,
           currentCycleNo: 1,
@@ -512,6 +520,7 @@ test("lets a subscriber accept and reject private-group invites", async () => {
   renderDashboard();
 
   expect(await screen.findByRole("heading", { name: /Private group invites/i })).toBeInTheDocument();
+  expect(screen.getAllByText(hasTextFragment("Invite status: Pending")).length).toBeGreaterThan(0);
   await user.click(screen.getByRole("button", { name: /Accept invite to Private Growth Chit/i }));
 
   expect(acceptGroupInvite).toHaveBeenCalledWith(31, 61);
@@ -521,6 +530,52 @@ test("lets a subscriber accept and reject private-group invites", async () => {
 
   expect(rejectGroupInvite).toHaveBeenCalledWith(32, 62);
   expect(await screen.findByText(/Rejected your invite for Private Savings Chit/i)).toBeInTheDocument();
+});
+
+test("shows expired invites as read-only and asks for a fresh invite", async () => {
+  getCurrentUser.mockReturnValue({
+    role: "subscriber",
+    subscriberId: 7,
+  });
+  mockUserDashboardResolvedValue({
+    subscriberId: 7,
+    memberships: [
+      {
+        membershipId: 61,
+        groupId: 31,
+        groupCode: "PRI-001",
+        groupTitle: "Private Growth Chit",
+        memberNo: 5,
+        membershipStatus: "invited",
+        inviteStatus: "expired",
+        inviteExpiresAt: "2026-04-20T10:00:00Z",
+        prizedStatus: "unprized",
+        canBid: false,
+        currentCycleNo: 1,
+        installmentAmount: 18000,
+        totalDue: 0,
+        totalPaid: 0,
+        outstandingAmount: 0,
+        paymentStatus: "FULL",
+        arrearsAmount: 0,
+        nextDueAmount: 0,
+        nextDueDate: null,
+        auctionStatus: null,
+        slotCount: 1,
+        wonSlotCount: 0,
+        remainingSlotCount: 1,
+      },
+    ],
+    activeAuctions: [],
+  });
+  fetchPublicChits.mockResolvedValue([]);
+
+  renderDashboard();
+
+  expect((await screen.findAllByText(hasTextFragment("Invite status: Expired"))).length).toBeGreaterThan(0);
+  expect(screen.getByText(/Ask the organizer to send a fresh invite/i)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Accept invite to Private Growth Chit/i })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /Reject invite to Private Growth Chit/i })).toBeDisabled();
 });
 
 test("shows a pending owner request state after submit", async () => {

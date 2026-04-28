@@ -35,7 +35,7 @@ def get_my_financial_summary(db: Session, current_user: CurrentUser) -> dict:
         slot_count = db.scalar(
             select(func.count(MembershipSlot.id)).where(
                 MembershipSlot.group_id == membership.group_id,
-                MembershipSlot.user_id == current_user.user.id,
+                MembershipSlot.membership_id == membership.id,
             )
         ) or 0
         effective_slot_count = max(int(slot_count), 1)

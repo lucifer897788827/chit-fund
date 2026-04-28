@@ -10,7 +10,22 @@ import {
   getOwnerDashboardFromUserDashboard,
   getSubscriberDashboardFromUserDashboard,
 } from "../features/dashboard/api";
-import { closeGroupCollection, fetchGroupMemberSummary, fetchGroupStatus, fetchGroups, finalizeAuctionSession, inviteSubscriberToGroup } from "../features/auctions/api";
+import {
+  approveGroupJoinRequest,
+  closeGroupCollection,
+  createGroupInvite,
+  fetchGroupInvites,
+  fetchGroupJoinRequests,
+  fetchGroupMemberSummary,
+  fetchGroupStatus,
+  fetchGroups,
+  finalizeAuctionSession,
+  removeGroupMember,
+  rejectGroupJoinRequest,
+  revokeGroupInvite,
+  searchGroupInviteCandidates,
+  updateGroupSettings,
+} from "../features/auctions/api";
 import AuctionRoomPage from "../features/auctions/AuctionRoomPage";
 import OwnerAuctionConsole from "../features/auctions/OwnerAuctionConsole";
 import SubscriberManagementPanel from "../features/subscribers/SubscriberManagementPanel";
@@ -18,7 +33,18 @@ import PaymentPanel from "../features/payments/PaymentPanel";
 import { fetchOwnerPayouts, fetchPayments, markOwnerPayoutPaid } from "../features/payments/api";
 import { buildMemberBalanceSummary, formatMoney, MemberBalanceSummary } from "../features/payments/balances";
 
-const TABS = ["members", "payments", "auction", "payout", "ledger", "settings"];
+const TABS = ["members", "invites", "payments", "auction", "payout", "ledger", "settings"];
+const COMMISSION_TYPE_OPTIONS = [
+  { value: "NONE", label: "None" },
+  { value: "FIRST_MONTH", label: "First month" },
+  { value: "PERCENTAGE", label: "Percentage" },
+  { value: "FIXED_AMOUNT", label: "Fixed amount" },
+];
+const AUCTION_TYPE_OPTIONS = [
+  { value: "LIVE", label: "Live" },
+  { value: "BLIND", label: "Blind" },
+  { value: "FIXED", label: "Fixed" },
+];
 
 function isClosedLifecycleStatus(status) {
   return ["COLLECTION_CLOSED", "AUCTION_DONE", "PAYOUT_DONE"].includes(String(status ?? "").toUpperCase());
@@ -36,8 +62,23 @@ function titleCase(value) {
   return String(value || "unknown")
     .split(/[_-]+/)
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(" ");
+}
+
+function formatShortDate(value) {
+  if (!value) {
+    return "No payment yet";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(parsed);
 }
 
 function getStatusBadgeClass(status) {
@@ -77,7 +118,13 @@ function normalizeOwnerGroup(group, detail) {
     totalDue: group?.totalDue,
     totalPaid: group?.totalPaid,
     outstandingAmount: group?.outstandingAmount,
+    slotsRemaining: detail?.slotsRemaining,
+    commissionType: detail?.commissionType,
+    auctionType: detail?.auctionType,
+    groupType: detail?.groupType,
     visibility: group?.visibility ?? detail?.visibility,
+    collectionClosed: group?.collectionClosed ?? detail?.collectionClosed,
+    currentMonthStatus: group?.currentMonthStatus ?? detail?.currentMonthStatus,
   };
 }
 
@@ -102,14 +149,26 @@ function normalizeMemberGroup(membership) {
   };
 }
 
+function toSlotMetrics(source) {
+  const slotCount = Number(source?.slotCount ?? 1);
+  const wonSlotCount = Number(source?.wonSlotCount ?? 0);
+  const remainingSlotCount = Number(source?.remainingSlotCount ?? Math.max(slotCount - wonSlotCount, 0));
+  return {
+    slotCount,
+    wonSlotCount,
+    remainingSlotCount,
+  };
+}
+
 function buildMemberRows({ balances, memberGroup }) {
   if (balances.length > 0) {
     return balances.map((balance) => ({
+      ...toSlotMetrics(balance),
       id: balance.membershipId,
       name: balance.memberName ?? `Member #${balance.memberNo ?? balance.membershipId}`,
-      status: Number(balance.outstandingAmount ?? 0) > 0 ? "pending" : "active",
+      status: "active",
       paymentStatus: Number(balance.outstandingAmount ?? 0) > 0 ? "pending" : "paid",
-      slotLabel: balance.memberNo ? `Slot ${balance.memberNo}` : balance.slotCount ? `${balance.slotCount} slots` : "Slot unclear",
+      memberNo: balance.memberNo,
       paid: Number(balance.totalPaid ?? 0),
       due: Number(balance.totalDue ?? 0),
       balance: Number(balance.outstandingAmount ?? 0),
@@ -119,11 +178,12 @@ function buildMemberRows({ balances, memberGroup }) {
   if (memberGroup) {
     return [
       {
+        ...toSlotMetrics(memberGroup),
         id: memberGroup.id,
         name: `Member #${memberGroup.memberNo ?? "N/A"}`,
-        status: memberGroup.status,
+        status: "active",
         paymentStatus: Number(memberGroup.outstandingAmount ?? 0) > 0 ? "pending" : "paid",
-        slotLabel: memberGroup.memberNo ? `Slot ${memberGroup.memberNo}` : memberGroup.slotCount ? `${memberGroup.slotCount} slots` : "Slot unclear",
+        memberNo: memberGroup.memberNo,
         paid: Number(memberGroup.totalPaid ?? 0),
         due: Number(memberGroup.totalDue ?? 0),
         balance: Number(memberGroup.outstandingAmount ?? 0),
@@ -132,6 +192,38 @@ function buildMemberRows({ balances, memberGroup }) {
     ];
   }
   return [];
+}
+
+function buildOwnerMemberRows({ balances, groupMemberSummary }) {
+  const balancesByMembershipId = new Map(
+    balances.map((balance) => [Number(balance.membershipId ?? balance.id), balance]),
+  );
+
+  if (groupMemberSummary.length === 0) {
+    return buildMemberRows({ balances, memberGroup: null });
+  }
+
+  return groupMemberSummary.map((member) => {
+    const balance = balancesByMembershipId.get(Number(member.membershipId));
+    const slotMetrics = toSlotMetrics(balance ?? member);
+    return {
+      ...slotMetrics,
+      id: member.membershipId,
+      name: member.memberName ?? `Member #${member.memberNo ?? member.membershipId}`,
+      status: member.membershipStatus ?? "active",
+      paymentStatus: balance ? (Number(balance.outstandingAmount ?? 0) > 0 ? "pending" : "paid") : "paid",
+      winStatus:
+        String(member.prizedStatus ?? "").toLowerCase() === "prized" || Number(slotMetrics.wonSlotCount) > 0 ? "won" : "waiting",
+      memberNo: member.memberNo,
+      paid: Number(member.paid ?? balance?.totalPaid ?? 0),
+      due: Number(balance?.totalDue ?? member.paid ?? 0),
+      balance: Number(balance?.outstandingAmount ?? 0),
+      lastPaymentDate: member.lastPaymentDate ?? balance?.lastPaymentDate ?? null,
+      removeEligible: Boolean(member.removeEligible),
+      removeBlockedReason: member.removeBlockedReason ?? null,
+      raw: { ...member, ...balance },
+    };
+  });
 }
 
 function GroupHeader({ auction, auctionBlockedByCollection, financials, group, isAuctionTabActive, isOwner, onOpenAuction, paymentSummary }) {
@@ -206,10 +298,12 @@ function GroupHeader({ auction, auctionBlockedByCollection, financials, group, i
   );
 }
 
-function MemberStatusTable({ emptyMessage, members }) {
+function MemberStatusTable({ emptyMessage, members, onRemove, removingMemberId }) {
   if (members.length === 0) {
     return <p>{emptyMessage}</p>;
   }
+
+  const showActions = typeof onRemove === "function";
 
   return (
     <div className="responsive-table mt-3">
@@ -217,20 +311,235 @@ function MemberStatusTable({ emptyMessage, members }) {
         <thead>
           <tr>
             <th>Member</th>
-            <th>Slot</th>
+            <th>Member no</th>
+            <th>Slots owned</th>
+            <th>Slots used</th>
+            <th>Slots remaining</th>
+            <th>Last payment</th>
+            <th>Win status</th>
             <th>Status</th>
             <th>Paid</th>
+            {showActions ? <th>Owner action</th> : null}
           </tr>
         </thead>
         <tbody>
           {members.map((member) => (
             <tr key={member.id}>
               <td>{member.name}</td>
-              <td>{member.slotLabel}</td>
+              <td>{member.memberNo ?? "N/A"}</td>
+              <td>{member.slotCount} owned</td>
+              <td>{member.wonSlotCount} used</td>
+              <td>{member.remainingSlotCount} remaining</td>
+              <td>{formatShortDate(member.lastPaymentDate)}</td>
+              <td>
+                <span className={getStatusBadgeClass(member.winStatus)}>{titleCase(member.winStatus)}</span>
+              </td>
               <td>
                 <span className={getStatusBadgeClass(member.paymentStatus)}>{titleCase(member.paymentStatus)}</span>
               </td>
               <td>{formatMoney(member.paid)}</td>
+              {showActions ? (
+                <td>
+                  <button
+                    className="action-button mt-0"
+                    disabled={!member.removeEligible || removingMemberId === member.id}
+                    onClick={() => onRemove(member)}
+                    title={member.removeEligible ? "Remove this member" : member.removeBlockedReason ?? "Member cannot be removed"}
+                    type="button"
+                  >
+                    {removingMemberId === member.id ? "Removing..." : "Remove member"}
+                  </button>
+                  {!member.removeEligible && member.removeBlockedReason ? (
+                    <p className="mt-2 text-xs text-slate-500">{member.removeBlockedReason}</p>
+                  ) : null}
+                </td>
+              ) : null}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function formatPaymentScore(score) {
+  if (score == null || score === "") {
+    return "No history";
+  }
+  return `${score}%`;
+}
+
+function PendingJoinRequestsTable({
+  approvingJoinRequestId,
+  groupIsFull,
+  joinRequests,
+  onApprove,
+  onReject,
+  rejectingJoinRequestId,
+  slotsRemaining,
+}) {
+  if (joinRequests.length === 0) {
+    return <p>No pending requests.</p>;
+  }
+
+  return (
+    <div className="responsive-table mt-3">
+      <table>
+        <thead>
+          <tr>
+            <th>Subscriber</th>
+            <th>Requested slots</th>
+            <th>Payment score</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {joinRequests.map((request) => (
+            <tr key={request.id}>
+              <td>{request.subscriberName ?? `Subscriber #${request.subscriberId}`}</td>
+              <td>{request.requestedSlotCount}</td>
+              <td>{formatPaymentScore(request.paymentScore)}</td>
+              <td>
+                <span className={getStatusBadgeClass(request.status)}>{titleCase(request.status)}</span>
+              </td>
+              <td>
+                {groupIsFull || Number(request.requestedSlotCount ?? 0) > Number(slotsRemaining ?? 0) ? (
+                  <p className="mb-2 text-xs text-slate-500">
+                    {groupIsFull ? "Group is full." : `Only ${slotsRemaining} slots remain.`}
+                  </p>
+                ) : null}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="action-button mt-0"
+                    disabled={
+                      approvingJoinRequestId === request.id ||
+                      rejectingJoinRequestId === request.id ||
+                      groupIsFull ||
+                      Number(request.requestedSlotCount ?? 0) > Number(slotsRemaining ?? 0)
+                    }
+                    onClick={() => onApprove(request)}
+                    type="button"
+                  >
+                    {approvingJoinRequestId === request.id ? "Approving..." : `Approve ${request.subscriberName ?? `#${request.subscriberId}`}`}
+                  </button>
+                  <button
+                    className="action-button mt-0"
+                    disabled={rejectingJoinRequestId === request.id || approvingJoinRequestId === request.id}
+                    onClick={() => onReject(request)}
+                    type="button"
+                  >
+                    {rejectingJoinRequestId === request.id ? "Rejecting..." : `Reject ${request.subscriberName ?? `#${request.subscriberId}`}`}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function InviteAuditTable({ invites, onRevoke, revokingInviteId }) {
+  if (invites.length === 0) {
+    return <p>No invite history yet.</p>;
+  }
+
+  return (
+    <div className="responsive-table mt-4">
+      <table>
+        <thead>
+          <tr>
+            <th>Subscriber</th>
+            <th>Status</th>
+            <th>Member no</th>
+            <th>Issued</th>
+            <th>Expires</th>
+            <th>Accepted</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {invites.map((invite) => (
+            <tr key={invite.inviteId}>
+              <td>{invite.subscriberName ?? `Subscriber #${invite.subscriberId}`}</td>
+              <td>
+                <span className={getStatusBadgeClass(invite.status)}>{titleCase(invite.status)}</span>
+              </td>
+              <td>{invite.memberNo ?? "N/A"}</td>
+              <td>{formatShortDate(invite.issuedAt)}</td>
+              <td>{formatShortDate(invite.expiresAt)}</td>
+              <td>{formatShortDate(invite.acceptedAt)}</td>
+              <td>
+                <button
+                  className="action-button mt-0"
+                  disabled={invite.status !== "pending" || revokingInviteId === invite.inviteId}
+                  onClick={() => onRevoke(invite)}
+                  type="button"
+                >
+                  {revokingInviteId === invite.inviteId ? "Revoking..." : "Revoke"}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function getInviteCandidateStatus(candidate) {
+  if (candidate.inviteStatus) {
+    return titleCase(candidate.inviteStatus);
+  }
+  if (candidate.membershipStatus) {
+    return titleCase(candidate.membershipStatus);
+  }
+  if (candidate.inviteEligible) {
+    return "Available";
+  }
+  return titleCase(candidate.subscriberStatus);
+}
+
+function InviteSearchResultsTable({ inviteCandidates, inviteSearchAttempted, invitingSubscriberId, onInvite }) {
+  if (inviteCandidates.length === 0) {
+    return <p>{inviteSearchAttempted ? "No matching subscribers found." : "Search by subscriber name or phone to send an invite."}</p>;
+  }
+
+  return (
+    <div className="responsive-table mt-3">
+      <table>
+        <thead>
+          <tr>
+            <th>Subscriber</th>
+            <th>Phone</th>
+            <th>State</th>
+            <th>Note</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {inviteCandidates.map((candidate) => (
+            <tr key={candidate.subscriberId}>
+              <td>{candidate.fullName}</td>
+              <td>{candidate.phone}</td>
+              <td>
+                <span className={getStatusBadgeClass(candidate.membershipStatus ?? (candidate.inviteEligible ? "active" : candidate.subscriberStatus))}>
+                  {getInviteCandidateStatus(candidate)}
+                </span>
+              </td>
+              <td>{candidate.note ?? "Ready to invite"}</td>
+              <td>
+                <button
+                  className="action-button mt-0"
+                  disabled={!candidate.inviteEligible || invitingSubscriberId === candidate.subscriberId}
+                  onClick={() => onInvite(candidate)}
+                  type="button"
+                >
+                  {invitingSubscriberId === candidate.subscriberId ? "Sending..." : `Invite ${candidate.fullName}`}
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -267,13 +576,27 @@ export default function GroupDetailPage() {
   const [groupStatusError, setGroupStatusError] = useState("");
   const [groupMemberSummary, setGroupMemberSummary] = useState([]);
   const [groupMemberSummaryError, setGroupMemberSummaryError] = useState("");
+  const [joinRequests, setJoinRequests] = useState([]);
+  const [joinRequestsError, setJoinRequestsError] = useState("");
+  const [approvingJoinRequestId, setApprovingJoinRequestId] = useState(null);
+  const [rejectingJoinRequestId, setRejectingJoinRequestId] = useState(null);
   const [collectionError, setCollectionError] = useState("");
   const [closingCollection, setClosingCollection] = useState(false);
   const [memberSearch, setMemberSearch] = useState("");
-  const [invitePhone, setInvitePhone] = useState("");
+  const [inviteSearchQuery, setInviteSearchQuery] = useState("");
+  const [inviteCandidates, setInviteCandidates] = useState([]);
+  const [inviteSearchAttempted, setInviteSearchAttempted] = useState(false);
+  const [groupInvites, setGroupInvites] = useState([]);
   const [inviteMessage, setInviteMessage] = useState("");
   const [inviteError, setInviteError] = useState("");
-  const [inviting, setInviting] = useState(false);
+  const [inviteSearchLoading, setInviteSearchLoading] = useState(false);
+  const [invitingSubscriberId, setInvitingSubscriberId] = useState(null);
+  const [revokingInviteId, setRevokingInviteId] = useState(null);
+  const [removingMemberId, setRemovingMemberId] = useState(null);
+  const [settingsDraft, setSettingsDraft] = useState({ commissionType: "NONE", auctionType: "LIVE" });
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [settingsError, setSettingsError] = useState("");
   const [confirmingResult, setConfirmingResult] = useState(false);
   const [confirmMessage, setConfirmMessage] = useState("");
   const [confirmError, setConfirmError] = useState("");
@@ -289,6 +612,7 @@ export default function GroupDetailPage() {
     setError("");
     setGroupStatusError("");
     setGroupMemberSummaryError("");
+    setJoinRequestsError("");
     setPaymentsError("");
     setPayoutsError("");
     setPaymentsLoading(Boolean(isOwner && numericGroupId));
@@ -298,6 +622,8 @@ export default function GroupDetailPage() {
     const groupsPromise = isOwner ? fetchGroups() : Promise.resolve([]);
     const groupStatusPromise = numericGroupId ? fetchGroupStatus(numericGroupId) : Promise.resolve(null);
     const groupMemberSummaryPromise = numericGroupId ? fetchGroupMemberSummary(numericGroupId) : Promise.resolve([]);
+    const joinRequestsPromise = isOwner && numericGroupId ? fetchGroupJoinRequests(numericGroupId) : Promise.resolve([]);
+    const invitesPromise = isOwner && numericGroupId ? fetchGroupInvites(numericGroupId) : Promise.resolve([]);
     const paymentsPromise = isOwner && numericGroupId ? fetchPayments({ groupId: numericGroupId }) : Promise.resolve([]);
     const payoutsPromise = isOwner && numericGroupId ? fetchOwnerPayouts({ groupId: numericGroupId }) : Promise.resolve([]);
 
@@ -306,10 +632,21 @@ export default function GroupDetailPage() {
       groupsPromise,
       groupStatusPromise,
       groupMemberSummaryPromise,
+      joinRequestsPromise,
+      invitesPromise,
       paymentsPromise,
       payoutsPromise,
     ])
-      .then(([dashboardResult, groupsResult, groupStatusResult, groupMemberSummaryResult, paymentsResult, payoutsResult]) => {
+      .then(([
+        dashboardResult,
+        groupsResult,
+        groupStatusResult,
+        groupMemberSummaryResult,
+        joinRequestsResult,
+        invitesResult,
+        paymentsResult,
+        payoutsResult,
+      ]) => {
         if (!active) {
           return;
         }
@@ -344,6 +681,20 @@ export default function GroupDetailPage() {
           setGroupMemberSummaryError(
             getApiErrorMessage(groupMemberSummaryResult.reason, { fallbackMessage: "Unable to load member summary." }),
           );
+        }
+
+        if (joinRequestsResult.status === "fulfilled") {
+          setJoinRequests(Array.isArray(joinRequestsResult.value) ? joinRequestsResult.value : []);
+        } else if (isOwner) {
+          setJoinRequestsError(
+            getApiErrorMessage(joinRequestsResult.reason, { fallbackMessage: "Unable to load join requests." }),
+          );
+        }
+
+        if (invitesResult.status === "fulfilled") {
+          setGroupInvites(Array.isArray(invitesResult.value) ? invitesResult.value : []);
+        } else if (isOwner) {
+          setInviteError(getApiErrorMessage(invitesResult.reason, { fallbackMessage: "Unable to load invites." }));
         }
 
         if (paymentsResult.status === "fulfilled") {
@@ -388,6 +739,35 @@ export default function GroupDetailPage() {
     return Boolean(group?.collectionClosed) || isClosedLifecycleStatus(group?.currentMonthStatus);
   }, [group, groupStatus]);
   const auctionBlockedByCollection = !isCollectionClosedLifecycleStatus(groupStatus?.status ?? group?.currentMonthStatus);
+  const settingsChanged =
+    settingsDraft.commissionType !== (group?.commissionType ?? "NONE") ||
+    settingsDraft.auctionType !== (group?.auctionType ?? "LIVE");
+  const settingsLocked =
+    Boolean(group?.collectionClosed) ||
+    Number(group?.currentCycleNo ?? 1) > 1 ||
+    String(group?.currentMonthStatus ?? "OPEN").toUpperCase() !== "OPEN";
+
+  useEffect(() => {
+    if (!group) {
+      return;
+    }
+    setSettingsDraft((current) => {
+      const nextDraft = {
+        commissionType: group.commissionType ?? "NONE",
+        auctionType: group.auctionType ?? "LIVE",
+      };
+      if (current.commissionType === nextDraft.commissionType && current.auctionType === nextDraft.auctionType) {
+        return current;
+      }
+      return nextDraft;
+    });
+  }, [group]);
+
+  useEffect(() => {
+    setSettingsMessage("");
+    setSettingsError("");
+  }, [numericGroupId]);
+
   const activeAuction = useMemo(() => {
     const ownerAuction = (ownerDashboard?.recentAuctions ?? []).find((auction) => Number(auction.groupId) === numericGroupId);
     const memberAuction = (memberDashboard?.activeAuctions ?? []).find((auction) => Number(auction.groupId) === numericGroupId);
@@ -397,7 +777,10 @@ export default function GroupDetailPage() {
     () => (ownerDashboard?.balances ?? memberDashboard?.memberships ?? []).filter((item) => Number(item.groupId) === numericGroupId),
     [memberDashboard, numericGroupId, ownerDashboard],
   );
-  const memberRows = useMemo(() => buildMemberRows({ balances, memberGroup }), [balances, memberGroup]);
+  const memberRows = useMemo(
+    () => (isOwner ? buildOwnerMemberRows({ balances, groupMemberSummary }) : buildMemberRows({ balances, memberGroup })),
+    [balances, groupMemberSummary, isOwner, memberGroup],
+  );
   const filteredMembers = useMemo(() => {
     const query = memberSearch.trim().toLowerCase();
     if (!query) {
@@ -406,7 +789,8 @@ export default function GroupDetailPage() {
     return memberRows.filter((member) => member.name.toLowerCase().includes(query) || String(member.id).includes(query));
   }, [memberRows, memberSearch]);
   const activeMembers = filteredMembers.filter((member) => String(member.status).toLowerCase() !== "pending");
-  const pendingMembers = filteredMembers.filter((member) => String(member.status).toLowerCase() === "pending");
+  const slotsRemaining = Number(group?.slotsRemaining ?? 0);
+  const groupIsFull = Number.isFinite(slotsRemaining) ? slotsRemaining <= 0 : false;
   const paymentSummary = useMemo(() => {
     const backendTotalCount = Number(groupStatus?.total_members);
     const backendPaidCount = Number(groupStatus?.paid_members);
@@ -482,23 +866,216 @@ export default function GroupDetailPage() {
     }
   }
 
-  async function handleInvite(event) {
+  async function handleSearchInviteCandidates(event) {
     event.preventDefault();
-    if (!invitePhone.trim()) {
-      setInviteError("Enter a phone number to invite.");
+    if (inviteSearchQuery.trim().length < 2) {
+      setInviteError("Enter at least 2 characters to search subscribers.");
+      setInviteCandidates([]);
+      setInviteSearchAttempted(true);
       return;
     }
-    setInviting(true);
+    setInviteSearchLoading(true);
+    setInviteError("");
+    setInviteMessage("");
+    setInviteSearchAttempted(true);
+    try {
+      const results = await searchGroupInviteCandidates(numericGroupId, inviteSearchQuery.trim());
+      setInviteCandidates(results);
+    } catch (inviteSearchFailure) {
+      setInviteError(getApiErrorMessage(inviteSearchFailure, { fallbackMessage: "Unable to search subscribers." }));
+    } finally {
+      setInviteSearchLoading(false);
+    }
+  }
+
+  async function handleCreateInvite(candidate) {
+    setInvitingSubscriberId(candidate.subscriberId);
     setInviteError("");
     setInviteMessage("");
     try {
-      await inviteSubscriberToGroup(numericGroupId, invitePhone.trim());
-      setInvitePhone("");
-      setInviteMessage("Invite sent.");
+      const invite = await createGroupInvite(numericGroupId, candidate.subscriberId);
+      setInviteCandidates((current) =>
+        current.map((item) =>
+          item.subscriberId === candidate.subscriberId
+            ? {
+                ...item,
+                membershipStatus: invite.membershipStatus,
+                memberNo: invite.memberNo,
+                inviteEligible: false,
+                note: `Invite sent as member #${invite.memberNo}`,
+              }
+            : item,
+        ),
+      );
+      setGroupInvites((current) => [
+        {
+          inviteId: invite.inviteId,
+          groupId: invite.groupId,
+          subscriberId: invite.subscriberId,
+          subscriberName: invite.subscriberName,
+          membershipId: invite.membershipId,
+          memberNo: invite.memberNo,
+          membershipStatus: invite.membershipStatus,
+          status: invite.inviteStatus ?? "pending",
+          issuedAt: invite.requestedAt,
+          expiresAt: invite.inviteExpiresAt,
+          acceptedAt: null,
+          revokedAt: null,
+        },
+        ...current,
+      ]);
+      setInviteMessage(`Invite sent to ${candidate.fullName}. Member #${invite.memberNo} is waiting for acceptance.`);
     } catch (inviteFailure) {
       setInviteError(getApiErrorMessage(inviteFailure, { fallbackMessage: "Unable to send invite." }));
     } finally {
-      setInviting(false);
+      setInvitingSubscriberId(null);
+    }
+  }
+
+  async function handleApproveJoinRequest(joinRequest) {
+    setApprovingJoinRequestId(joinRequest.id);
+    setJoinRequestsError("");
+    try {
+      const membership = await approveGroupJoinRequest(numericGroupId, joinRequest.id);
+      setJoinRequests((current) => current.filter((item) => item.id !== joinRequest.id));
+      setGroupMemberSummary((current) => [
+        ...current,
+        {
+          membershipId: membership.id,
+          subscriberId: membership.subscriberId,
+          memberNo: membership.memberNo,
+          memberName: joinRequest.subscriberName,
+          paid: 0,
+          received: 0,
+          dividend: 0,
+          net: 0,
+          lastPaymentDate: null,
+          prizedStatus: "unprized",
+          slotCount: membership.slotCount,
+          wonSlotCount: membership.wonSlotCount,
+          remainingSlotCount: membership.remainingSlotCount,
+        },
+      ]);
+      setGroupStatus((current) =>
+        current
+          ? {
+              ...current,
+              total_members: Number(current.total_members ?? 0) + 1,
+            }
+          : current,
+      );
+      setGroupDetails((current) =>
+        current.map((item) =>
+          Number(item.id) === numericGroupId
+            ? {
+                ...item,
+                slotsRemaining: Math.max(Number(item.slotsRemaining ?? 0) - Number(membership.slotCount ?? 0), 0),
+              }
+            : item,
+        ),
+      );
+    } catch (approvalError) {
+      setJoinRequestsError(getApiErrorMessage(approvalError, { fallbackMessage: "Unable to approve this join request." }));
+    } finally {
+      setApprovingJoinRequestId(null);
+    }
+  }
+
+  async function handleRevokeInvite(invite) {
+    setRevokingInviteId(invite.inviteId);
+    setInviteError("");
+    setInviteMessage("");
+    try {
+      const revokedInvite = await revokeGroupInvite(numericGroupId, invite.inviteId);
+      setGroupInvites((current) =>
+        current.map((item) => (item.inviteId === invite.inviteId ? { ...item, ...revokedInvite } : item)),
+      );
+      setInviteMessage(`Invite for ${invite.subscriberName ?? `subscriber #${invite.subscriberId}`} was revoked.`);
+    } catch (revokeError) {
+      setInviteError(getApiErrorMessage(revokeError, { fallbackMessage: "Unable to revoke this invite." }));
+    } finally {
+      setRevokingInviteId(null);
+    }
+  }
+
+  async function handleRejectJoinRequest(joinRequest) {
+    setRejectingJoinRequestId(joinRequest.id);
+    setJoinRequestsError("");
+    try {
+      await rejectGroupJoinRequest(numericGroupId, joinRequest.id);
+      setJoinRequests((current) => current.filter((item) => item.id !== joinRequest.id));
+    } catch (rejectError) {
+      setJoinRequestsError(getApiErrorMessage(rejectError, { fallbackMessage: "Unable to reject this join request." }));
+    } finally {
+      setRejectingJoinRequestId(null);
+    }
+  }
+
+  async function handleRemoveMember(member) {
+    if (typeof window !== "undefined" && !window.confirm(`Remove ${member.name} from this group?`)) {
+      return;
+    }
+    setRemovingMemberId(member.id);
+    setInviteError("");
+    setInviteMessage("");
+    try {
+      const removedMembership = await removeGroupMember(numericGroupId, member.id);
+      const releasedSlots = Number(removedMembership.slotsReleased ?? member.slotCount ?? 0);
+      setGroupMemberSummary((current) => current.filter((item) => Number(item.membershipId) !== Number(member.id)));
+      setOwnerDashboard((current) => {
+        if (!current) {
+          return current;
+        }
+        return {
+          ...current,
+          balances: (current.balances ?? []).filter((item) => Number(item.membershipId) !== Number(member.id)),
+        };
+      });
+      setGroupStatus((current) => {
+        if (!current) {
+          return current;
+        }
+        const nextTotalMembers = Math.max(Number(current.total_members ?? 0) - 1, 0);
+        return {
+          ...current,
+          total_members: nextTotalMembers,
+          paid_members: Math.min(Number(current.paid_members ?? 0), nextTotalMembers),
+        };
+      });
+      setGroupDetails((current) =>
+        current.map((item) =>
+          Number(item.id) === numericGroupId
+            ? {
+                ...item,
+                slotsRemaining: Number(item.slotsRemaining ?? 0) + releasedSlots,
+              }
+            : item,
+        ),
+      );
+      setInviteMessage(`${member.name} was removed and ${releasedSlots} slot${releasedSlots === 1 ? "" : "s"} were released.`);
+    } catch (removeFailure) {
+      setInviteError(getApiErrorMessage(removeFailure, { fallbackMessage: "Unable to remove this member." }));
+    } finally {
+      setRemovingMemberId(null);
+    }
+  }
+
+  async function handleSaveSettings(event) {
+    event.preventDefault();
+    if (!isOwner || !numericGroupId || savingSettings || !settingsChanged) {
+      return;
+    }
+    setSavingSettings(true);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const updated = await updateGroupSettings(numericGroupId, settingsDraft);
+      setGroupDetails((current) => current.map((item) => (Number(item.id) === numericGroupId ? { ...item, ...updated } : item)));
+      setSettingsMessage("Group settings saved.");
+    } catch (saveFailure) {
+      setSettingsError(getApiErrorMessage(saveFailure, { fallbackMessage: "Unable to save group settings." }));
+    } finally {
+      setSavingSettings(false);
     }
   }
 
@@ -626,9 +1203,20 @@ export default function GroupDetailPage() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h2>Members</h2>
-              <p>Active and pending members are separated for faster review.</p>
+              <p>Active members, slot usage, and owner approvals are all visible here.</p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <span className="rounded-full bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800">
+                Slot usage: {activeMembers.reduce((sum, member) => sum + Number(member.wonSlotCount ?? 0), 0)} won / {activeMembers.reduce((sum, member) => sum + Number(member.slotCount ?? 0), 0)} owned
+              </span>
+              {typeof group.slotsRemaining === "number" ? (
+                <span className="rounded-full bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">
+                  Slots remaining: {group.slotsRemaining} of {group.memberCount ?? "N/A"}
+                </span>
+              ) : null}
+              {groupIsFull ? (
+                <span className="rounded-full bg-amber-100 px-3 py-2 text-sm font-medium text-amber-900">Group full</span>
+              ) : null}
               <button className="action-button mt-0" onClick={handleCopyGroupId} type="button">
                 Copy Group ID
               </button>
@@ -644,30 +1232,37 @@ export default function GroupDetailPage() {
           />
 
           {isOwner ? (
-            <form className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={handleInvite}>
-              <input
-                className="text-input"
-                onChange={(event) => setInvitePhone(event.target.value)}
-                placeholder="Subscriber phone number"
-                type="tel"
-                value={invitePhone}
-              />
-              <button className="action-button mt-0" disabled={inviting} type="submit">
-                {inviting ? "Sending..." : "Invite"}
-              </button>
-            </form>
+            <>
+              <p className="mt-4 text-sm text-slate-500">
+                Join requests stay pending until you approve them, and approval is blocked once the group runs out of slot capacity.
+              </p>
+            </>
           ) : null}
           {inviteMessage ? <p className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-emerald-900">{inviteMessage}</p> : null}
           {inviteError ? <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-red-900">{inviteError}</p> : null}
+          {joinRequestsError ? <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-red-900">{joinRequestsError}</p> : null}
 
           <div className="panel-grid mt-4 md:grid-cols-2">
             <section className="status-panel status-panel--success">
               <h3>Active</h3>
-              <MemberStatusTable emptyMessage="No active members match this view." members={activeMembers} />
+              <MemberStatusTable
+                emptyMessage="No active members match this view."
+                members={activeMembers}
+                onRemove={isOwner ? handleRemoveMember : undefined}
+                removingMemberId={removingMemberId}
+              />
             </section>
             <section className="status-panel status-panel--danger">
-              <h3>Pending</h3>
-              <MemberStatusTable emptyMessage="No pending members match this view." members={pendingMembers} />
+              <h3>Pending requests</h3>
+              <PendingJoinRequestsTable
+                approvingJoinRequestId={approvingJoinRequestId}
+                groupIsFull={groupIsFull}
+                joinRequests={joinRequests}
+                onApprove={handleApproveJoinRequest}
+                onReject={handleRejectJoinRequest}
+                rejectingJoinRequestId={rejectingJoinRequestId}
+                slotsRemaining={slotsRemaining}
+              />
             </section>
           </div>
 
@@ -679,6 +1274,62 @@ export default function GroupDetailPage() {
               </div>
             </details>
           ) : null}
+        </section>
+      ) : null}
+
+      {activeTab === "invites" ? (
+        <section className="panel" role="tabpanel">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2>Invites</h2>
+              <p>Track pending, accepted, expired, and revoked invites in one place.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {typeof group.slotsRemaining === "number" ? (
+                <span className="rounded-full bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">
+                  Slots remaining: {group.slotsRemaining} of {group.memberCount ?? "N/A"}
+                </span>
+              ) : null}
+              {groupIsFull ? (
+                <span className="rounded-full bg-amber-100 px-3 py-2 text-sm font-medium text-amber-900">Group full</span>
+              ) : null}
+            </div>
+          </div>
+
+          {isOwner ? (
+            <>
+              <form className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={handleSearchInviteCandidates}>
+                <input
+                  className="text-input"
+                  onChange={(event) => setInviteSearchQuery(event.target.value)}
+                  placeholder="Search subscribers by name or phone"
+                  type="search"
+                  value={inviteSearchQuery}
+                />
+                <button className="action-button mt-0" disabled={inviteSearchLoading || group.visibility !== "private"} type="submit">
+                  {inviteSearchLoading ? "Searching..." : "Search subscribers"}
+                </button>
+              </form>
+              <p className="mt-3 text-sm text-slate-500">
+                {group.visibility === "private"
+                  ? "Search an existing subscriber and send a direct invite. Pending invites can be revoked before acceptance."
+                  : "Direct invites are only available for private groups."}
+              </p>
+              {group.visibility === "private" ? (
+                <InviteSearchResultsTable
+                  inviteCandidates={inviteCandidates}
+                  inviteSearchAttempted={inviteSearchAttempted}
+                  invitingSubscriberId={invitingSubscriberId}
+                  onInvite={handleCreateInvite}
+                />
+              ) : null}
+              <InviteAuditTable invites={groupInvites} onRevoke={handleRevokeInvite} revokingInviteId={revokingInviteId} />
+            </>
+          ) : (
+            <p>Only the group owner can manage invites.</p>
+          )}
+          {inviteMessage ? <p className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-emerald-900">{inviteMessage}</p> : null}
+          {inviteError ? <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-red-900">{inviteError}</p> : null}
         </section>
       ) : null}
 
@@ -875,8 +1526,64 @@ export default function GroupDetailPage() {
       {activeTab === "settings" ? (
         <section className="panel" role="tabpanel">
           <h2>Settings</h2>
-          <p>Settings are read-only here because a backend group-update endpoint is unclear from codebase.</p>
-          <dl className="mt-4 grid gap-3 md:grid-cols-2">
+          <p>Keep commission and auction behavior visible here so owners can adjust configuration without leaving the group workspace.</p>
+          {settingsMessage ? <p className="text-sm font-semibold text-emerald-700">{settingsMessage}</p> : null}
+          {settingsError ? <p className="text-sm font-semibold text-red-700">{settingsError}</p> : null}
+          {isOwner ? (
+            <form className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={handleSaveSettings}>
+              <label className="grid gap-2" htmlFor="group-settings-commission-type">
+                <span className="font-semibold text-slate-600">Commission type</span>
+                <select
+                  className="text-input"
+                  disabled={settingsLocked}
+                  id="group-settings-commission-type"
+                  onChange={(event) => {
+                    setSettingsDraft((current) => ({ ...current, commissionType: event.target.value }));
+                    setSettingsMessage("");
+                    setSettingsError("");
+                  }}
+                  value={settingsDraft.commissionType}
+                >
+                  {COMMISSION_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-2" htmlFor="group-settings-auction-type">
+                <span className="font-semibold text-slate-600">Auction type</span>
+                <select
+                  className="text-input"
+                  disabled={settingsLocked}
+                  id="group-settings-auction-type"
+                  onChange={(event) => {
+                    setSettingsDraft((current) => ({ ...current, auctionType: event.target.value }));
+                    setSettingsMessage("");
+                    setSettingsError("");
+                  }}
+                  value={settingsDraft.auctionType}
+                >
+                  {AUCTION_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="md:col-span-2">
+                <button className="action-button" disabled={settingsLocked || savingSettings || !settingsChanged} type="submit">
+                  {savingSettings ? "Saving..." : "Save settings"}
+                </button>
+              </div>
+            </form>
+          ) : null}
+          {isOwner && settingsLocked ? (
+            <p className="mt-4 text-sm text-slate-600">Settings are locked because this group has already started its auction lifecycle.</p>
+          ) : (
+            !isOwner ? <p className="mt-4 text-sm text-slate-600">Only the group owner can update these settings.</p> : null
+          )}
+          <dl className="mt-6 grid gap-3 md:grid-cols-2">
             <div>
               <dt className="font-semibold text-slate-500">Code</dt>
               <dd>{group.groupCode}</dd>
@@ -892,6 +1599,18 @@ export default function GroupDetailPage() {
             <div>
               <dt className="font-semibold text-slate-500">Members</dt>
               <dd>{group.activeMemberCount ?? group.memberCount ?? "N/A"}</dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-slate-500">Group type</dt>
+              <dd>{titleCase(group.groupType)}</dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-slate-500">Current commission</dt>
+              <dd>{titleCase(group.commissionType)}</dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-slate-500">Current auction mode</dt>
+              <dd>{titleCase(group.auctionType)}</dd>
             </div>
           </dl>
         </section>

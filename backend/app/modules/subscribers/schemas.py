@@ -34,6 +34,8 @@ class SubscriberDashboardMembership(BaseModel):
     groupTitle: str
     memberNo: int
     membershipStatus: str
+    inviteStatus: str | None = None
+    inviteExpiresAt: datetime | None = None
     prizedStatus: str
     canBid: bool
     currentCycleNo: int
