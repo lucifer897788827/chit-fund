@@ -379,7 +379,7 @@ function PendingJoinRequestsTable({
   slotsRemaining,
 }) {
   if (joinRequests.length === 0) {
-    return <p>No pending requests.</p>;
+    return <p>No pending requests</p>;
   }
 
   return (
@@ -1246,7 +1246,7 @@ export default function GroupDetailPage() {
             <section className="status-panel status-panel--success">
               <h3>Active</h3>
               <MemberStatusTable
-                emptyMessage="No active members match this view."
+                emptyMessage={memberSearch.trim() ? "No matching members" : "No members yet"}
                 members={activeMembers}
                 onRemove={isOwner ? handleRemoveMember : undefined}
                 removingMemberId={removingMemberId}

@@ -379,7 +379,7 @@ test("approves a pending join request from the members tab", async () => {
 
   await waitFor(() => expect(approveGroupJoinRequest).toHaveBeenCalledWith(42, 91));
   expect(screen.getByRole("table")).toHaveTextContent("88%");
-  expect(await screen.findByText("No pending requests.")).toBeInTheDocument();
+  expect(await screen.findByText("No pending requests")).toBeInTheDocument();
   expect(await screen.findByText("Asha Devi")).toBeInTheDocument();
 });
 
@@ -441,7 +441,23 @@ test("rejects a pending join request from the members tab", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Reject Latha" }));
 
   await waitFor(() => expect(rejectGroupJoinRequest).toHaveBeenCalledWith(42, 92));
-  expect(await screen.findByText("No pending requests.")).toBeInTheDocument();
+  expect(await screen.findByText("No pending requests")).toBeInTheDocument();
+});
+
+test("shows clear empty states when there are no members or pending join requests", async () => {
+  fetchGroupStatus.mockResolvedValue({
+    collection_closed: false,
+    status: "OPEN",
+    paid_members: 0,
+    total_members: 0,
+  });
+  fetchGroupMemberSummary.mockResolvedValue([]);
+  fetchGroupJoinRequests.mockResolvedValue([]);
+
+  renderGroupTab("members");
+
+  expect(await screen.findByText("No members yet")).toBeInTheDocument();
+  expect(screen.getByText("No pending requests")).toBeInTheDocument();
 });
 
 test("searches subscribers and sends an invite from the invites tab", async () => {
